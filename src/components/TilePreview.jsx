@@ -1,5 +1,6 @@
 import React from 'react';
 import { tilePathD } from '../tiles/tilePath.js';
+import { arcPathCCW } from '../geometry/arc.js';
 
 // Thumbnail of a tile in the inventory drawer. Tap the thumbnail to place it
 // onto the canvas; tap "delete" to remove the tile (and any placements of it).
@@ -38,17 +39,10 @@ export default function TilePreview({ tile, onUse, onDelete }) {
               );
             }
             if (ink.type === 'arc') {
-              let d2 = ink.ang2 - ink.ang1;
-              while (d2 < 0) d2 += 2 * Math.PI;
-              const largeArc = d2 > Math.PI ? 1 : 0;
-              const sx = ink.center.x + ink.radius * Math.cos(ink.ang1);
-              const sy = ink.center.y + ink.radius * Math.sin(ink.ang1);
-              const ex = ink.center.x + ink.radius * Math.cos(ink.ang2);
-              const ey = ink.center.y + ink.radius * Math.sin(ink.ang2);
               return (
                 <path
                   key={i}
-                  d={`M ${sx} ${sy} A ${ink.radius} ${ink.radius} 0 ${largeArc} 1 ${ex} ${ey}`}
+                  d={arcPathCCW(ink.center, ink.radius, ink.ang1, ink.ang2)}
                   fill="none" stroke="#1B1B1B" strokeWidth={strokeInk} strokeLinecap="round"
                 />
               );

@@ -10,6 +10,7 @@ import {
 } from '../geometry/vec.js';
 import { projOnSeg, projOnCircle, isAngleBetween, pointInPoly } from '../geometry/project.js';
 import { computeIntersections, getLineSegments, getCircleArcs } from '../geometry/intersections.js';
+import { arcPathCCW, arcMidPointCCW } from '../geometry/arc.js';
 import { newId } from '../geometry/id.js';
 
 import { tilePathD } from '../tiles/tilePath.js';
@@ -513,12 +514,7 @@ export default function ZellijApp() {
       if (!C) continue;
       const arcs = getCircleArcs(circleHits, id, C);
       for (const arc of arcs) {
-        let midAng = (arc.ang1 + arc.ang2) / 2;
-        if (arc.ang2 < arc.ang1) midAng = (arc.ang1 + arc.ang2 + 2 * Math.PI) / 2;
-        const midP = {
-          x: C.center.x + C.radius * Math.cos(midAng),
-          y: C.center.y + C.radius * Math.sin(midAng),
-        };
+        const midP = arcMidPointCCW(C.center, C.radius, arc.ang1, arc.ang2);
         if (pointInPoly(midP, polyVerts)) {
           constructionInside.push({
             type: 'arc',
@@ -562,9 +558,7 @@ export default function ZellijApp() {
     } else if (ink.type === 'arc') {
       const C = circles[ink.circleId];
       if (!C) return false;
-      let mid = (ink.ang1 + ink.ang2) / 2;
-      if (ink.ang2 < ink.ang1) mid = (ink.ang1 + ink.ang2 + 2 * Math.PI) / 2;
-      pt = { x: C.center.x + C.radius * Math.cos(mid), y: C.center.y + C.radius * Math.sin(mid) };
+      pt = arcMidPointCCW(C.center, C.radius, ink.ang1, ink.ang2);
     } else {
       return false;
     }
@@ -621,40 +615,44 @@ export default function ZellijApp() {
 
   const recenter = () => setView({ tx: containerSize.w / 2, ty: containerSize.h / 2, scale: view.scale });
 
+  // Cancel any in-flight selection / draft / polygon. Used by tool switches,
+  // undo/redo (state was just replaced; old refs are stale), and canvas clear.
+  const clearInteraction = () => {
+    setEditing(null); setDraft(null); setPolyDraft([]);
+  };
+
   const onClickClear = () => {
     if (confirmClear) {
       pushUndo();
       setLines({}); setCircles({}); setInks([]); setPlaced([]);
-      setEditing(null); setDraft(null); setPolyDraft([]);
+      clearInteraction();
       setConfirmClear(false);
     } else {
       setConfirmClear(true);
     }
   };
 
-  const undoAction = () => { if (undo()) { setEditing(null); setDraft(null); setPolyDraft([]); } };
-  const redoAction = () => { if (redo()) { setEditing(null); setDraft(null); setPolyDraft([]); } };
+  const undoAction = () => { if (undo()) clearInteraction(); };
+  const redoAction = () => { if (redo()) clearInteraction(); };
 
   // ============================ INK PATHS (RENDER MEMO) ============================
+  // Normalises every ink record into the common shape consumed by <StrokedShape>:
+  // { type: 'line', a, b } | { type: 'arc', center, radius, ang1, ang2 } | { type: 'wholeCircle', center, radius }.
   const inkPaths = useMemo(() => {
     const paths = [];
     for (const ink of inks) {
       if (ink.type === 'lineSeg') {
         const L = lines[ink.lineId];
         if (!L) continue;
-        const a = lerp(L.p1, L.p2, ink.t1);
-        const b = lerp(L.p1, L.p2, ink.t2);
-        paths.push({ kind: 'line', a, b });
+        paths.push({ type: 'line', a: lerp(L.p1, L.p2, ink.t1), b: lerp(L.p1, L.p2, ink.t2) });
       } else if (ink.type === 'arc') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        const a = { x: C.center.x + C.radius * Math.cos(ink.ang1), y: C.center.y + C.radius * Math.sin(ink.ang1) };
-        const b = { x: C.center.x + C.radius * Math.cos(ink.ang2), y: C.center.y + C.radius * Math.sin(ink.ang2) };
-        paths.push({ kind: 'arc', a, b, center: C.center, radius: C.radius });
+        paths.push({ type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2 });
       } else if (ink.type === 'wholeCircle') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        paths.push({ kind: 'wholeCircle', center: C.center, radius: C.radius });
+        paths.push({ type: 'wholeCircle', center: C.center, radius: C.radius });
       }
     }
     return paths;
@@ -685,7 +683,7 @@ export default function ZellijApp() {
     >
       <Toolbar
         tool={tool}
-        onSelectTool={(t) => { setTool(t); setDraft(null); setEditing(null); setPolyDraft([]); }}
+        onSelectTool={(t) => { setTool(t); clearInteraction(); }}
         onUndo={undoAction} canUndo={canUndo}
         onRedo={redoAction} canRedo={canRedo}
         showCons={showCons} onToggleCons={() => setShowCons((s) => !s)}
@@ -773,7 +771,10 @@ export default function ZellijApp() {
             ))}
 
             {/* Inks */}
-            {inkPaths.map((p, i) => <InkPath key={`ink-${i}`} p={p} scale={view.scale} />)}
+            {inkPaths.map((p, i) => (
+              <StrokedShape key={`ink-${i}`} shape={p} scale={view.scale}
+                stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
+            ))}
 
             {/* Placed tiles */}
             {placed.map((pt) => {
@@ -785,9 +786,13 @@ export default function ZellijApp() {
                   <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="#3A2E1F"
                     strokeWidth={1.8 / view.scale} strokeLinejoin="round" />
                   {showCons && tile.construction && tile.construction.map((c, i) => (
-                    <ConstructionMark key={`tc-${i}`} c={c} scale={view.scale} />
+                    <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
+                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
                   ))}
-                  {tile.inks.map((ink, i) => <TileInk key={i} ink={ink} scale={view.scale} />)}
+                  {tile.inks.map((ink, i) => (
+                    <StrokedShape key={i} shape={ink} scale={view.scale}
+                      stroke="#1B1B1B" strokeWidth={2} lineCap="round" />
+                  ))}
                   {editing?.kind === 'placedTile' && editing.id === pt.id && (
                     <path d={tilePathD(tile)} fill="none" stroke="#C58A3A"
                       strokeWidth={2.5 / view.scale}
@@ -798,7 +803,10 @@ export default function ZellijApp() {
             })}
 
             {/* Polygon-in-progress preview */}
-            {polyDraft.map((pd, i) => <PolyDraftSeg key={`pd-${i}`} pd={pd} scale={view.scale} />)}
+            {polyDraft.map((pd, i) => (
+              <StrokedShape key={`pd-${i}`} shape={polyDraftShape(pd)} scale={view.scale}
+                stroke="#C58A3A" strokeWidth={3} lineCap="round" opacity={0.85} />
+            ))}
 
             {/* Polygon vertex indicators: next-vertex (filled) and closure-target (ring). */}
             {polyDraft.length > 0 && (() => {
@@ -820,7 +828,11 @@ export default function ZellijApp() {
             })()}
 
             {/* Rejected polygon-tap feedback. */}
-            {polyRejected && <PolyRejectedSeg seg={polyRejected} scale={view.scale} />}
+            {polyRejected && (
+              <StrokedShape shape={polyRejectedShape(polyRejected)} scale={view.scale}
+                stroke="#8B2E1A" strokeWidth={3.5} lineCap="round" opacity={0.7}
+                pointerEvents="none" />
+            )}
 
             {/* Draft preview */}
             {draft?.kind === 'line' && (
@@ -838,12 +850,10 @@ export default function ZellijApp() {
               </>
             )}
 
-            {/* Edit-mode handles. */}
-            {handles.map((h, i) => <Handle key={`h-${i}`} h={h} scale={view.scale} />)}
-
             {/* Snap-target markers (shown in line/circle tools). Tappable: tapping a marker can
                 start a new draft from the exact intersection. Defers to handle-drag if a handle
-                is closer than the marker. */}
+                is closer than the marker. Rendered before edit handles so handles draw on top —
+                otherwise a marker at a line endpoint covers the lengthen handle's center. */}
             {showSnapButtons && (() => {
               const targets = computeSnapTargets();
               const shown = [];
@@ -899,6 +909,10 @@ export default function ZellijApp() {
                 );
               });
             })()}
+
+            {/* Edit-mode handles — drawn after snap markers so a marker at a handle position
+                doesn't cover the handle's centre glyph. */}
+            {handles.map((h, i) => <Handle key={`h-${i}`} h={h} scale={view.scale} />)}
 
             {/* Snap indicator */}
             {snapIndicator && (
@@ -1200,137 +1214,41 @@ function addPlacedTileHandles(handles, pt, tile, id, {
 
 // ============================ SMALL RENDER COMPONENTS ============================
 
-function InkPath({ p, scale }) {
-  if (p.kind === 'line') {
-    return (
-      <line x1={p.a.x} y1={p.a.y} x2={p.b.x} y2={p.b.y}
-        stroke="#1B1B1B" strokeWidth={2.5 / scale} strokeLinecap="round" />
-    );
+// Render a stroked line / CCW arc / whole circle. Stroke widths are world-space
+// inputs that get divided by `scale` so they render at constant screen size.
+//
+// `shape` is one of:
+//   { type: 'line',        a, b }
+//   { type: 'arc',         center, radius, ang1, ang2 }
+//   { type: 'wholeCircle', center, radius }
+function StrokedShape({ shape, scale, stroke, strokeWidth, opacity = 1, lineCap, pointerEvents }) {
+  const sw = strokeWidth / scale;
+  const common = { stroke, strokeWidth: sw, fill: 'none', opacity };
+  if (lineCap) common.strokeLinecap = lineCap;
+  if (pointerEvents !== undefined) common.pointerEvents = pointerEvents;
+
+  if (shape.type === 'line') {
+    return <line x1={shape.a.x} y1={shape.a.y} x2={shape.b.x} y2={shape.b.y} {...common} />;
   }
-  if (p.kind === 'arc') {
-    // SVG sweep-flag=1 corresponds to math-CCW direction with our y-down coord system.
-    const a1 = angBetween(p.center, p.a);
-    const a2 = angBetween(p.center, p.b);
-    let d2 = a2 - a1;
-    while (d2 < 0) d2 += 2 * Math.PI;
-    const largeArc = d2 > Math.PI ? 1 : 0;
-    return (
-      <path
-        d={`M ${p.a.x} ${p.a.y} A ${p.radius} ${p.radius} 0 ${largeArc} 1 ${p.b.x} ${p.b.y}`}
-        fill="none" stroke="#1B1B1B" strokeWidth={2.5 / scale} strokeLinecap="round"
-      />
-    );
+  if (shape.type === 'arc') {
+    return <path d={arcPathCCW(shape.center, shape.radius, shape.ang1, shape.ang2)} {...common} />;
   }
-  if (p.kind === 'wholeCircle') {
-    return (
-      <circle cx={p.center.x} cy={p.center.y} r={p.radius}
-        fill="none" stroke="#1B1B1B" strokeWidth={2.5 / scale} />
-    );
+  if (shape.type === 'wholeCircle') {
+    return <circle cx={shape.center.x} cy={shape.center.y} r={shape.radius} {...common} />;
   }
   return null;
 }
 
-function ConstructionMark({ c, scale }) {
-  if (c.type === 'line') {
-    return (
-      <line x1={c.a.x} y1={c.a.y} x2={c.b.x} y2={c.b.y}
-        stroke="#9C8A6A" strokeWidth={1 / scale} opacity={0.4} />
-    );
-  }
-  if (c.type === 'arc') {
-    let d2 = c.ang2 - c.ang1; while (d2 < 0) d2 += 2 * Math.PI;
-    const largeArc = d2 > Math.PI ? 1 : 0;
-    const sx = c.center.x + c.radius * Math.cos(c.ang1);
-    const sy = c.center.y + c.radius * Math.sin(c.ang1);
-    const ex = c.center.x + c.radius * Math.cos(c.ang2);
-    const ey = c.center.y + c.radius * Math.sin(c.ang2);
-    return (
-      <path d={`M ${sx} ${sy} A ${c.radius} ${c.radius} 0 ${largeArc} 1 ${ex} ${ey}`}
-        fill="none" stroke="#9C8A6A" strokeWidth={1 / scale} opacity={0.4} />
-    );
-  }
-  if (c.type === 'wholeCircle') {
-    return (
-      <circle cx={c.center.x} cy={c.center.y} r={c.radius}
-        fill="none" stroke="#9C8A6A" strokeWidth={1 / scale} opacity={0.4} />
-    );
-  }
-  return null;
-}
+// `findSegmentAt` produces hits with `type: 'lineSeg'` / 'arc' (it doesn't normalise to the
+// StrokedShape vocabulary). These two helpers map a polygon-tap segment record into the
+// StrokedShape `shape` format. Polygon segs are never `wholeCircle` so we ignore that case.
+const polyDraftShape = (pd) => pd.seg.type === 'lineSeg'
+  ? { type: 'line', a: pd.from, b: pd.to }
+  : pd.seg; // already { type: 'arc', center, radius, ang1, ang2 }
 
-function TileInk({ ink, scale }) {
-  if (ink.type === 'line') {
-    return (
-      <line x1={ink.a.x} y1={ink.a.y} x2={ink.b.x} y2={ink.b.y}
-        stroke="#1B1B1B" strokeWidth={2 / scale} strokeLinecap="round" />
-    );
-  }
-  if (ink.type === 'arc') {
-    let d2 = ink.ang2 - ink.ang1; while (d2 < 0) d2 += 2 * Math.PI;
-    const largeArc = d2 > Math.PI ? 1 : 0;
-    const sx = ink.center.x + ink.radius * Math.cos(ink.ang1);
-    const sy = ink.center.y + ink.radius * Math.sin(ink.ang1);
-    const ex = ink.center.x + ink.radius * Math.cos(ink.ang2);
-    const ey = ink.center.y + ink.radius * Math.sin(ink.ang2);
-    return (
-      <path d={`M ${sx} ${sy} A ${ink.radius} ${ink.radius} 0 ${largeArc} 1 ${ex} ${ey}`}
-        fill="none" stroke="#1B1B1B" strokeWidth={2 / scale} strokeLinecap="round" />
-    );
-  }
-  if (ink.type === 'wholeCircle') {
-    return (
-      <circle cx={ink.center.x} cy={ink.center.y} r={ink.radius}
-        fill="none" stroke="#1B1B1B" strokeWidth={2 / scale} />
-    );
-  }
-  return null;
-}
-
-function PolyDraftSeg({ pd, scale }) {
-  if (pd.seg.type === 'lineSeg') {
-    return (
-      <line x1={pd.from.x} y1={pd.from.y} x2={pd.to.x} y2={pd.to.y}
-        stroke="#C58A3A" strokeWidth={3 / scale} strokeLinecap="round" opacity={0.85} />
-    );
-  }
-  if (pd.seg.type === 'arc') {
-    const center = pd.seg.center, r = pd.seg.radius;
-    const sa1 = pd.seg.ang1, sa2 = pd.seg.ang2;
-    const sx = center.x + r * Math.cos(sa1), sy = center.y + r * Math.sin(sa1);
-    const ex = center.x + r * Math.cos(sa2), ey = center.y + r * Math.sin(sa2);
-    let delta = sa2 - sa1; while (delta < 0) delta += 2 * Math.PI;
-    const largeArc = delta > Math.PI ? 1 : 0;
-    return (
-      <path d={`M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`}
-        fill="none" stroke="#C58A3A" strokeWidth={3 / scale} strokeLinecap="round" opacity={0.85} />
-    );
-  }
-  return null;
-}
-
-function PolyRejectedSeg({ seg, scale }) {
-  if (seg.type === 'lineSeg') {
-    return (
-      <line x1={seg.a.x} y1={seg.a.y} x2={seg.b.x} y2={seg.b.y}
-        stroke="#8B2E1A" strokeWidth={3.5 / scale} strokeLinecap="round" opacity={0.7}
-        pointerEvents="none" />
-    );
-  }
-  if (seg.type === 'arc') {
-    const sx = seg.center.x + seg.radius * Math.cos(seg.ang1);
-    const sy = seg.center.y + seg.radius * Math.sin(seg.ang1);
-    const ex = seg.center.x + seg.radius * Math.cos(seg.ang2);
-    const ey = seg.center.y + seg.radius * Math.sin(seg.ang2);
-    let delta = seg.ang2 - seg.ang1; while (delta < 0) delta += 2 * Math.PI;
-    const largeArc = delta > Math.PI ? 1 : 0;
-    return (
-      <path d={`M ${sx} ${sy} A ${seg.radius} ${seg.radius} 0 ${largeArc} 1 ${ex} ${ey}`}
-        fill="none" stroke="#8B2E1A" strokeWidth={3.5 / scale} strokeLinecap="round" opacity={0.7}
-        pointerEvents="none" />
-    );
-  }
-  return null;
-}
+const polyRejectedShape = (seg) => seg.type === 'lineSeg'
+  ? { type: 'line', a: seg.a, b: seg.b }
+  : seg;
 
 function Handle({ h, scale }) {
   return (
