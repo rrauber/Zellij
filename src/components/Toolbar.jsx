@@ -5,6 +5,7 @@ const TOOLS = [
   { id: 'circle',  label: 'Circle (C)',   icon: '○' },
   { id: 'ink',     label: 'Ink (I)',      icon: '✎' },
   { id: 'polygon', label: 'Polygon (P)',  icon: '◇' },
+  { id: 'fill',    label: 'Fill (F)',     icon: '●' },
   { id: 'select',  label: 'Select (S/V)', icon: '⇲' },
 ];
 

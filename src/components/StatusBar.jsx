@@ -1,7 +1,9 @@
 import React from 'react';
+import { COLOR_PALETTE } from '../constants.js';
 
-// The skinny strip below the toolbar. Shows draft hints, polygon progress, and
-// editing controls (rotation step, flip, delete) when an item is selected.
+// The skinny strip below the toolbar. Shows draft hints, polygon progress,
+// editing controls (rotation step, flip, delete), and — in fill mode — the
+// colour palette.
 export default function StatusBar({
   draft, polyDraft, editing,
   onClearEditing,
@@ -9,12 +11,48 @@ export default function StatusBar({
   rotationStepDeg, rotationStepRad,
   onCycleRotationStep,
   onRotatePlaced, onSnapPlacedToGrid, onResetPlaced, onFlipPlaced,
+  tool, selectedColor, onSelectColor,
 }) {
-  const visible = draft || polyDraft.length > 0 || editing;
+  const fillActive = tool === 'fill';
+  const visible = draft || polyDraft.length > 0 || editing || fillActive;
   if (!visible) return null;
 
   return (
     <div className="px-3 py-1 text-xs" style={{ background: '#D9C9A4', color: '#3A2E1F', fontStyle: 'italic' }}>
+      {fillActive && (
+        <div className="flex items-center gap-1.5">
+          <span style={{ marginRight: 4 }}>Tap a region to fill</span>
+          {COLOR_PALETTE.map((c) => {
+            const isSelected = c === selectedColor;
+            const isEraser = c === null;
+            return (
+              <button
+                key={c ?? 'eraser'}
+                onClick={() => onSelectColor(c)}
+                title={isEraser ? 'Eraser' : c}
+                style={{
+                  width: 22, height: 22,
+                  borderRadius: 11,
+                  background: isEraser ? 'transparent' : c,
+                  border: isSelected ? '2.5px solid #3A2E1F' : '1px solid #3A2E1F',
+                  boxShadow: isSelected ? '0 0 0 1.5px #F1E9D6 inset' : 'none',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  flexShrink: 0,
+                }}
+              >
+                {isEraser && (
+                  <span style={{
+                    position: 'absolute', inset: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 12, color: '#8B2E1A',
+                  }}>✕</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
       {draft?.kind === 'line' && 'Tap to set second endpoint'}
       {draft?.kind === 'circle' && draft.step === 'measureA' && 'Tap second point to set compass width'}
       {draft?.kind === 'circle' && draft.step === 'placing' && 'Tap any point to place a circle. Tap Circle tool to remeasure.'}

@@ -3,6 +3,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import {
   SNAP_PX, HANDLE_R, HANDLE_HIT_PAD, TAP_PX, EPS,
   ROTATION_STEPS_DEG, DEFAULT_ROTATION_STEP_IDX,
+  DEFAULT_COLOR,
 } from '../constants.js';
 
 import {
@@ -14,6 +15,7 @@ import { arcPathCCW } from '../geometry/arc.js';
 import { clipLineByPolygon, clipArcByPolygon, clipWholeCircleByPolygon } from '../geometry/clip.js';
 import { intersectShapes } from '../geometry/shapeIntersect.js';
 import { shapesEqual } from '../geometry/shapeEqual.js';
+import { buildFaces, faceContains, faceToPath, signedArea } from '../geometry/planar.js';
 import { newId } from '../geometry/id.js';
 
 import { tilePathD } from '../tiles/tilePath.js';
@@ -34,6 +36,7 @@ export default function ZellijApp() {
     inks, setInks,
     tiles, setTiles,
     placed, setPlaced,
+    colors, setColors,
     pushUndo, undo, redo, canUndo, canRedo,
   } = useDocument();
 
@@ -45,6 +48,11 @@ export default function ZellijApp() {
   const [showCons, setShowCons] = useState(true);
   const [snapIndicator, setSnapIndicator] = useState(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+
+  // Currently selected fill colour (null = eraser). Persists across tool
+  // switches so the user doesn't lose their colour when, say, popping into
+  // Select to nudge a tile and back into Fill.
+  const [selectedColor, setSelectedColor] = useState(DEFAULT_COLOR);
 
   // Rotation step grid for placed tiles. Cycles through symmetry-friendly increments.
   const [rotationStepIdx, setRotationStepIdx] = useState(DEFAULT_ROTATION_STEP_IDX);
@@ -94,6 +102,61 @@ export default function ZellijApp() {
       return { scale: newScale, tx: cx - worldX * newScale, ty: cy - worldY * newScale };
     });
   }, []);
+
+  // ============================ INK GRAPH (for fills) ============================
+  // Every visible ink in world coords, as stroked-shapes. Inputs to the planar
+  // face finder: any ink that bounds a coloured region needs to be in here.
+  const globalInkShapes = useMemo(() => {
+    const out = [];
+    // Canvas inks are stored line/circle-relative; resolve to world geometry.
+    for (const ink of inks) {
+      if (ink.type === 'lineSeg') {
+        const L = lines[ink.lineId];
+        if (!L) continue;
+        out.push({ type: 'line', a: lerp(L.p1, L.p2, ink.t1), b: lerp(L.p1, L.p2, ink.t2) });
+      } else if (ink.type === 'arc') {
+        const C = circles[ink.circleId];
+        if (!C) continue;
+        out.push({ type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2 });
+      } else if (ink.type === 'wholeCircle') {
+        const C = circles[ink.circleId];
+        if (!C) continue;
+        out.push({ type: 'wholeCircle', center: C.center, radius: C.radius });
+      }
+    }
+    // Placed-tile inks (already stored as stroked-shapes in tile-local coords).
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      for (const ink of tile.inks || []) out.push(transformShape(ink, pt));
+    }
+    return out;
+  }, [inks, lines, circles, placed, tiles]);
+
+  // The bounded faces of the ink graph. Sorted by area ascending so a tap can
+  // pick the smallest containing face (most specific region). The graph build
+  // is O(N²) in ink count for the intersection step but N is small for hand-
+  // drawn zellij designs and the memo only re-runs when inks change.
+  const planarFaces = useMemo(() => {
+    const { faces, vertices } = buildFaces(globalInkShapes);
+    const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
+    withArea.sort((a, b) => a.area - b.area);
+    return withArea;
+  }, [globalInkShapes]);
+
+  // For each persisted colour point, find the smallest face containing it and
+  // emit { d, color } for rendering. Stable across edits because colours are
+  // anchored to a point in world space, not to a face identifier.
+  const coloredFaces = useMemo(() => {
+    if (planarFaces.length === 0) return [];
+    const out = [];
+    for (const c of colors) {
+      const hit = planarFaces.find(({ face, vertices }) => faceContains(face, vertices, c));
+      if (!hit) continue;
+      out.push({ d: faceToPath(hit.face, hit.vertices), color: c.color });
+    }
+    return out;
+  }, [planarFaces, colors]);
 
   // ============================ SNAPPING ============================
   // Tile-internal intersections (and crossings of tile content with canvas
@@ -286,6 +349,7 @@ export default function ZellijApp() {
     if (tool === 'select') return tapSelect(worldP);
     if (tool === 'ink') return handleInkTap(worldP);
     if (tool === 'polygon') return handlePolygonTap(worldP);
+    if (tool === 'fill') return handleFillTap(worldP);
   };
 
   const tapLine = (worldP) => {
@@ -510,6 +574,25 @@ export default function ZellijApp() {
       }
       return { ...t, inks: [...(t.inks || []), edgeShape] };
     }));
+  };
+
+  // ============================ FILL TOOL ============================
+  // Tap inside a region to apply the currently-selected palette colour. The
+  // region is the smallest face whose chord-polygon contains the tap; any
+  // existing colour anchor inside that face is replaced (or removed, if the
+  // selected colour is null — eraser). New colour anchors are stored at the
+  // tap point itself, so the colour stays attached to a place in the design
+  // even as inks move and faces rebuild around it.
+  const handleFillTap = (worldP) => {
+    const hit = planarFaces.find(({ face, vertices }) => faceContains(face, vertices, worldP));
+    if (!hit) return;
+    pushUndo();
+    const { face, vertices } = hit;
+    const remaining = colors.filter((c) => !faceContains(face, vertices, c));
+    if (selectedColor) {
+      remaining.push({ x: worldP.x, y: worldP.y, color: selectedColor });
+    }
+    setColors(remaining);
   };
 
   // ============================ POLYGON TOOL ============================
@@ -858,7 +941,7 @@ export default function ZellijApp() {
   const onClickClear = () => {
     if (confirmClear) {
       pushUndo();
-      setLines({}); setCircles({}); setInks([]); setPlaced([]);
+      setLines({}); setCircles({}); setInks([]); setPlaced([]); setColors([]);
       clearInteraction();
       setConfirmClear(false);
     } else {
@@ -919,6 +1002,7 @@ export default function ZellijApp() {
         case 'c': case 'C': s.setTool('circle');  s.clearInteraction(); break;
         case 'i': case 'I': s.setTool('ink');     s.clearInteraction(); break;
         case 'p': case 'P': s.setTool('polygon'); s.clearInteraction(); break;
+        case 'f': case 'F': s.setTool('fill');    s.clearInteraction(); break;
         case 'v': case 'V': // V for "select" — S is too easy to fat-finger near 'A'/'D'
         case 's': case 'S': s.setTool('select');  s.clearInteraction(); break;
         case 'h': case 'H': s.setShowCons((x) => !x); break;
@@ -1005,6 +1089,9 @@ export default function ZellijApp() {
         onSnapPlacedToGrid={snapPlacedToGrid}
         onResetPlaced={resetPlaced}
         onFlipPlaced={flipPlaced}
+        tool={tool}
+        selectedColor={selectedColor}
+        onSelectColor={setSelectedColor}
       />
 
       <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ background: '#F1E9D6' }}>
@@ -1060,6 +1147,14 @@ export default function ZellijApp() {
           onPointerCancel={onPointerUp}
         >
           <g transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}>
+            {/* Coloured face fills — rendered first so construction lines, ink
+                strokes, and tile silhouettes all draw on top. Stable across
+                ink edits because colours are anchored to a world point, not to
+                a face identifier. */}
+            {coloredFaces.map((cf, i) => (
+              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
+            ))}
+
             {/* Construction circles */}
             {showCons && Object.entries(circles).map(([id, c]) => (
               <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
