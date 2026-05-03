@@ -9,9 +9,10 @@ import {
   dist, sub, add, lerp, angBetween, normAng, rot,
 } from '../geometry/vec.js';
 import { projOnSeg, projOnCircle, isAngleBetween, pointInPoly } from '../geometry/project.js';
-import { computeIntersections, getLineSegments, getCircleArcs } from '../geometry/intersections.js';
+import { computeIntersections, getLineSegments, getCircleArcs, pidForPoint } from '../geometry/intersections.js';
 import { arcPathCCW } from '../geometry/arc.js';
 import { clipLineByPolygon, clipArcByPolygon, clipWholeCircleByPolygon } from '../geometry/clip.js';
+import { intersectShapes } from '../geometry/shapeIntersect.js';
 import { newId } from '../geometry/id.js';
 
 import { tilePathD } from '../tiles/tilePath.js';
@@ -94,6 +95,45 @@ export default function ZellijApp() {
   }, []);
 
   // ============================ SNAPPING ============================
+  // Tile-internal intersections (and crossings of tile content with canvas
+  // construction). Memoised because computeSnapTargets is hot — called on every
+  // pointer move during a drag — and this loop is O(tile-shapes²).
+  const tileIntersectionPoints = useMemo(() => {
+    if (placed.length === 0) return [];
+    const out = [];
+    const canvasShapes = [
+      ...Object.values(lines).map((l) => ({ type: 'line', a: l.p1, b: l.p2 })),
+      ...Object.values(circles).map((c) => ({ type: 'wholeCircle', center: c.center, radius: c.radius })),
+    ];
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      // Inks already include the boundary (post-v2), so iterating inks +
+      // construction covers every visible stroke without double-counting edges.
+      const tileShapes = [
+        ...(tile.inks || []),
+        ...(tile.construction || []),
+      ].map((s) => transformShape(s, pt));
+      // Pairwise within this placed tile.
+      for (let i = 0; i < tileShapes.length; i++) {
+        for (let j = i + 1; j < tileShapes.length; j++) {
+          for (const p of intersectShapes(tileShapes[i], tileShapes[j])) {
+            out.push({ x: p.x, y: p.y, kind: 'tile-intersection' });
+          }
+        }
+      }
+      // Each tile shape vs every canvas shape.
+      for (const ts of tileShapes) {
+        for (const cs of canvasShapes) {
+          for (const p of intersectShapes(ts, cs)) {
+            out.push({ x: p.x, y: p.y, kind: 'tile-intersection' });
+          }
+        }
+      }
+    }
+    return out;
+  }, [placed, tiles, lines, circles]);
+
   // Returns: { points: [{x,y, kind}], lines1D: [...], circles1D: [...] }
   const computeSnapTargets = useCallback(() => {
     const points = [];
@@ -116,12 +156,14 @@ export default function ZellijApp() {
         points.push({ x: w.x, y: w.y, kind: 'tile-vertex', placedId: pt.id });
       }
     }
+    // Crossings of tile-interior strokes (with each other and with canvas).
+    for (const p of tileIntersectionPoints) points.push(p);
     return {
       points,
       lines1D: Object.entries(lines).map(([id, l]) => ({ id, ...l })),
       circles1D: Object.entries(circles).map(([id, c]) => ({ id, ...c })),
     };
-  }, [intersections, lines, circles, placed, tiles]);
+  }, [intersections, lines, circles, placed, tiles, tileIntersectionPoints]);
 
   // Find the best snap for a world-coord point. Priority: 0D points > 1D lines/circles > free.
   const trySnap = useCallback((worldP, opts = {}) => {
@@ -359,6 +401,46 @@ export default function ZellijApp() {
         }
       }
     }
+    // Placed-tile edges. Treated as polygon-eligible segments with the same
+    // shape as canvas sub-segments; lineId/circleId are absent (these don't
+    // belong to any canvas line/circle), but pidA/pidB are position-based so
+    // they connect to canvas pids automatically wherever world points coincide.
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      for (const e of tile.edges) {
+        if (e.type === 'line') {
+          const a = transformPoint(tile.vertices[e.from], pt);
+          const b = transformPoint(tile.vertices[e.to],   pt);
+          const p = projOnSeg(w, a, b);
+          if (p.dist < tolWorld && (!best || p.dist < best.dist)) {
+            best = {
+              type: 'lineSeg', a, b,
+              dist: p.dist,
+              pidA: pidForPoint(a), pidB: pidForPoint(b),
+            };
+          }
+        } else if (e.type === 'arc') {
+          // Convert to a stroked-shape arc (CCW ang1 → ang2) in world coords.
+          const arc = transformShape(edgeToShape(e, tile.vertices), pt);
+          const p = projOnCircle(w, arc.center, arc.radius);
+          if (p.dist < tolWorld && isAngleBetween(p.angle, arc.ang1, arc.ang2)) {
+            if (!best || p.dist < best.dist) {
+              const a = { x: arc.center.x + arc.radius * Math.cos(arc.ang1), y: arc.center.y + arc.radius * Math.sin(arc.ang1) };
+              const b = { x: arc.center.x + arc.radius * Math.cos(arc.ang2), y: arc.center.y + arc.radius * Math.sin(arc.ang2) };
+              best = {
+                type: 'arc',
+                center: arc.center, radius: arc.radius,
+                ang1: arc.ang1, ang2: arc.ang2,
+                a, b,
+                dist: p.dist,
+                pidA: pidForPoint(a), pidB: pidForPoint(b),
+              };
+            }
+          }
+        }
+      }
+    }
     return best;
   };
 
@@ -366,6 +448,10 @@ export default function ZellijApp() {
   const handleInkTap = (w) => {
     const seg = findSegmentAt(w);
     if (!seg) return;
+    // Tile edges have no canvas line/circle id — they're already inks of the
+    // parent tile (set at finalize time). Inking-on-canvas doesn't apply to them.
+    if (seg.type === 'lineSeg' && !seg.lineId) return;
+    if (seg.type === 'arc' && !seg.circleId) return;
     pushUndo();
     if (seg.type === 'lineSeg') {
       const idx = inks.findIndex(
@@ -395,11 +481,13 @@ export default function ZellijApp() {
     if (seg.type === 'wholeCircle') return; // can't be a polygon edge
 
     // Tapping a segment already in the draft truncates back to before it.
-    // Equality uses pidA/pidB pair (set), independent of FP precision.
+    // Equality uses pidA/pidB pair (set), independent of FP precision. The
+    // lineId/circleId checks are skipped when an id is missing (tile-edge segs
+    // don't carry one) — pid equality is sufficient there.
     const sameSeg = (a, b) => {
       if (a.type !== b.type) return false;
-      if (a.type === 'lineSeg' && a.lineId !== b.lineId) return false;
-      if (a.type === 'arc' && a.circleId !== b.circleId) return false;
+      if (a.type === 'lineSeg' && a.lineId && b.lineId && a.lineId !== b.lineId) return false;
+      if (a.type === 'arc' && a.circleId && b.circleId && a.circleId !== b.circleId) return false;
       return (a.pidA === b.pidA && a.pidB === b.pidB) || (a.pidA === b.pidB && a.pidB === b.pidA);
     };
     for (let i = 0; i < polyDraft.length; i++) {
@@ -565,18 +653,18 @@ export default function ZellijApp() {
     }
 
     // ---- 5. Flatten placed tiles whose centroid is inside ----
-    // A placed tile here represents a stamp the user assembled; once captured
-    // it's baked in (its boundary becomes inks, its inks/construction transform
-    // into the new tile's local coords) and removed from the canvas.
+    // A placed tile here is a stamp the user assembled; we *snapshot* its
+    // visible content (boundary + inks + construction) into the new tile in
+    // local coords. The original placement stays on the canvas — same way
+    // construction lines stay when you trace a polygon over them. The user
+    // can delete it manually if they want.
     const flattenedInks = [];
     const flattenedCons = [];
-    const removedPlacedIds = new Set();
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
       const centroidWorld = transformPoint({ x: 0, y: 0 }, pt); // tile-local origin = its centroid
       if (!pointInPoly(centroidWorld, polyVerts)) continue;
-      removedPlacedIds.add(pt.id);
       // The flattened inks/construction can extend past the polygon if the
       // placed tile only partially overlaps it, so clip them too.
       for (const ink of tile.inks) captureClipped(transformShape(ink, pt), flattenedInks);
@@ -601,9 +689,6 @@ export default function ZellijApp() {
       inks: [...boundaryInks, ...inksInside, ...flattenedInks],
       construction: [...constructionInside, ...flattenedCons],
     }]);
-    if (removedPlacedIds.size > 0) {
-      setPlaced((P) => P.filter((p) => !removedPlacedIds.has(p.id)));
-    }
     setSheetOpen(true);
   };
 

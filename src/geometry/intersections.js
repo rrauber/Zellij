@@ -5,6 +5,13 @@ import { EPS } from '../constants.js';
 import { dist, angBetween } from './vec.js';
 import { segSegIntersect, segCircleIntersect, circleCircleIntersect } from './intersect.js';
 
+// Position-based pid scheme. Two world points within ~PID_TOL/2 of the same
+// bucket centre share a pid. The polygon connectivity check compares pids by
+// equality, so this is what makes canvas intersections, free line endpoints,
+// placed-tile vertices, and tile-edge endpoints all unify into one graph.
+const PID_TOL = 0.01; // world units
+export const pidForPoint = (p) => `p_${Math.round(p.x / PID_TOL)}_${Math.round(p.y / PID_TOL)}`;
+
 // Per line: list of {x, y, t, kind, pid} sorted by t.
 // Per circle: list of {x, y, angle, kind, pid} sorted by angle.
 // `pid` is a stable ID for the canonical intersection point (or a synthetic
@@ -86,7 +93,7 @@ export const computeIntersections = (lines, circles) => {
         if (dist(h, p) < canonTol) {
           h.x = p.x;
           h.y = p.y;
-          h.pid = pi;
+          h.pid = pidForPoint(p);
           break;
         }
       }
@@ -95,15 +102,18 @@ export const computeIntersections = (lines, circles) => {
   for (const id in lineHits) canonicalize(lineHits[id]);
   for (const id in circleHits) canonicalize(circleHits[id]);
 
-  // Synthetic pids for endpoint hits not coincident with any canonical intersection.
-  // These are line endpoints "in free space" — they don't share with anything else, so
-  // they get a unique signature based on (lineId, p1 vs p2). Stable across renders since
-  // line IDs are stable.
+  // Endpoint hits not coincident with any canonical intersection still get a
+  // position-based pid so they unify with anything else at the same world point
+  // (e.g. a placed-tile vertex sharing a line endpoint, or two free endpoints
+  // at the same spot).
   for (const lid in lineHits) {
     for (const h of lineHits[lid]) {
-      if (h.pid === undefined && h.kind === 'endpoint') {
-        h.pid = `ep_${lid}_${h.t < 0.5 ? 'p1' : 'p2'}`;
-      }
+      if (h.pid === undefined) h.pid = pidForPoint(h);
+    }
+  }
+  for (const cid in circleHits) {
+    for (const h of circleHits[cid]) {
+      if (h.pid === undefined) h.pid = pidForPoint(h);
     }
   }
 
