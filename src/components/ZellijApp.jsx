@@ -135,6 +135,39 @@ export default function ZellijApp() {
     return out;
   }, [inks, lines, circles, placed, tiles]);
 
+  // Un-inked tile edges that coincide with another placed tile's un-inked edge
+  // (in world coords) shouldn't render — the two faint strokes would just draw
+  // on top of each other at the seam between adjacent tiles. We only suppress
+  // un-inked seams; an inked edge always renders bold regardless of whether
+  // its neighbour also inked the shared edge.
+  //
+  // Keyed by `${placedId}:${edgeIdx}` so the per-tile render can quickly check
+  // whether to skip a given edge.
+  const sharedEdgeKeys = useMemo(() => {
+    if (placed.length < 2) return new Set();
+    const all = []; // [{ key, worldShape }]
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      for (let i = 0; i < tile.edges.length; i++) {
+        const localShape = edgeToShape(tile.edges[i], tile.vertices);
+        if (!localShape) continue;
+        if ((tile.inks || []).some((ink) => shapesEqual(localShape, ink))) continue;
+        all.push({ key: `${pt.id}:${i}`, worldShape: transformShape(localShape, pt) });
+      }
+    }
+    const shared = new Set();
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        if (shapesEqual(all[i].worldShape, all[j].worldShape)) {
+          shared.add(all[i].key);
+          shared.add(all[j].key);
+        }
+      }
+    }
+    return shared;
+  }, [placed, tiles]);
+
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
   // pick the smallest containing face (most specific region). The graph build
   // is O(N²) in ink count for the intersection step but N is small for hand-
@@ -1184,10 +1217,18 @@ export default function ZellijApp() {
               // finalize / by the ink tool). Inked edges render bold via the inks
               // pass below; un-inked edges render faintly here so the tile shape
               // is still legible. Always rendered regardless of showCons, since
-              // they're the tile's outline, not scaffolding.
+              // they're the tile's outline, not scaffolding. Edges that coincide
+              // with another placed tile's un-inked edge (a shared seam between
+              // adjacent tiles) are dropped — see sharedEdgeKeys.
               const uninkedEdgeShapes = tile.edges
-                .map((e) => edgeToShape(e, tile.vertices))
-                .filter((s) => s && !tile.inks.some((ink) => shapesEqual(s, ink)));
+                .map((e, idx) => {
+                  const s = edgeToShape(e, tile.vertices);
+                  if (!s) return null;
+                  if (tile.inks.some((ink) => shapesEqual(s, ink))) return null;
+                  if (sharedEdgeKeys.has(`${pt.id}:${idx}`)) return null;
+                  return s;
+                })
+                .filter(Boolean);
               return (
                 <g key={pt.id} transform={transform}>
                   <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="none" />
