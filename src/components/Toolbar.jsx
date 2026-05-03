@@ -1,11 +1,11 @@
 import React from 'react';
 
 const TOOLS = [
-  { id: 'line',    label: 'Line',    icon: '/' },
-  { id: 'circle',  label: 'Circle',  icon: '○' },
-  { id: 'ink',     label: 'Ink',     icon: '✎' },
-  { id: 'polygon', label: 'Polygon', icon: '◇' },
-  { id: 'select',  label: 'Select',  icon: '⇲' },
+  { id: 'line',    label: 'Line (L)',     icon: '/' },
+  { id: 'circle',  label: 'Circle (C)',   icon: '○' },
+  { id: 'ink',     label: 'Ink (I)',      icon: '✎' },
+  { id: 'polygon', label: 'Polygon (P)',  icon: '◇' },
+  { id: 'select',  label: 'Select (S/V)', icon: '⇲' },
 ];
 
 export default function Toolbar({
@@ -41,11 +41,11 @@ export default function Toolbar({
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        <IconBtn onClick={onUndo} disabled={!canUndo} title="Undo">↶</IconBtn>
-        <IconBtn onClick={onRedo} disabled={!canRedo} title="Redo">↷</IconBtn>
+        <IconBtn onClick={onUndo} disabled={!canUndo} title="Undo (⌘Z)">↶</IconBtn>
+        <IconBtn onClick={onRedo} disabled={!canRedo} title="Redo (⇧⌘Z)">↷</IconBtn>
         <IconBtn
           onClick={onToggleCons}
-          title={showCons ? 'Hide construction' : 'Show construction'}
+          title={(showCons ? 'Hide construction' : 'Show construction') + ' (H)'}
           style={{
             background: showCons ? 'transparent' : '#3A2E1F',
             color: showCons ? '#3A2E1F' : '#F1E9D6',
@@ -54,7 +54,7 @@ export default function Toolbar({
         >
           {showCons ? '◫' : '▢'}
         </IconBtn>
-        <IconBtn onClick={onRecenter} title="Recenter">⊕</IconBtn>
+        <IconBtn onClick={onRecenter} title="Recenter (R)">⊕</IconBtn>
         <button
           onClick={onClear}
           title="Clear canvas"

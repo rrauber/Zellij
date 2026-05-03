@@ -79,6 +79,19 @@ export default function ZellijApp() {
     [view],
   );
 
+  // Multiply scale by `factor` while keeping the world point currently under the
+  // screen-space (cx, cy) cursor pinned to that same screen point. Used by the
+  // wheel handler and keyboard zoom; pinch zoom uses its own math because its
+  // anchor moves with the gesture.
+  const zoomAt = useCallback((cx, cy, factor) => {
+    setView((v) => {
+      const newScale = Math.max(0.001, v.scale * factor);
+      const worldX = (cx - v.tx) / v.scale;
+      const worldY = (cy - v.ty) / v.scale;
+      return { scale: newScale, tx: cx - worldX * newScale, ty: cy - worldY * newScale };
+    });
+  }, []);
+
   // ============================ SNAPPING ============================
   // Returns: { points: [{x,y, kind}], lines1D: [...], circles1D: [...] }
   const computeSnapTargets = useCallback(() => {
@@ -573,6 +586,29 @@ export default function ZellijApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerSize]);
 
+  // Wheel zoom — anchored at the cursor. Native listener with passive:false so
+  // we can preventDefault the page scroll. macOS trackpad pinch arrives as
+  // wheel events with ctrlKey set; we use a higher gain in that case so the
+  // pinch feels responsive instead of crawling.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = svg.getBoundingClientRect();
+      const cx = e.clientX - r.left;
+      const cy = e.clientY - r.top;
+      // Normalise across deltaMode (Firefox sometimes reports lines/pages).
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16;
+      else if (e.deltaMode === 2) dy *= window.innerHeight;
+      const k = e.ctrlKey ? 0.02 : 0.0015;
+      zoomAt(cx, cy, Math.exp(-dy * k));
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, [zoomAt]);
+
   // ============================ ACTIONS ON EDITING ITEM ============================
   const updateLine   = (id, patch) => setLines((L) => ({ ...L, [id]: { ...L[id], ...patch } }));
   const updateCircle = (id, patch) => setCircles((C) => ({ ...C, [id]: { ...C[id], ...patch } }));
@@ -634,6 +670,73 @@ export default function ZellijApp() {
 
   const undoAction = () => { if (undo()) clearInteraction(); };
   const redoAction = () => { if (redo()) clearInteraction(); };
+
+  // ============================ KEYBOARD SHORTCUTS ============================
+  // Ref pattern: the listener attaches once on mount, but reads the latest
+  // state/handlers via this ref each keypress. Avoids re-binding the global
+  // listener on every render.
+  const kbdRef = useRef();
+  kbdRef.current = {
+    editing, tool, containerSize,
+    deleteLine, deleteCircle, deletePlaced,
+    undoAction, redoAction, recenter, clearInteraction,
+    setTool, setShowCons, zoomAt,
+  };
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      // Don't intercept while the user is typing into a text field.
+      const tag = e.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+      const s = kbdRef.current;
+      const mod = e.metaKey || e.ctrlKey;
+
+      if (mod) {
+        const k = e.key.toLowerCase();
+        if (k === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) s.redoAction(); else s.undoAction();
+          return;
+        }
+        if (k === 'y') {
+          e.preventDefault();
+          s.redoAction();
+          return;
+        }
+        return; // other modifier combos pass through
+      }
+
+      switch (e.key) {
+        case 'Delete':
+        case 'Backspace':
+          if (!s.editing) return;
+          e.preventDefault();
+          if (s.editing.kind === 'line') s.deleteLine(s.editing.id);
+          else if (s.editing.kind === 'circle') s.deleteCircle(s.editing.id);
+          else if (s.editing.kind === 'placedTile') s.deletePlaced(s.editing.id);
+          break;
+        case 'Escape':
+          s.clearInteraction();
+          break;
+        case 'l': case 'L': s.setTool('line');    s.clearInteraction(); break;
+        case 'c': case 'C': s.setTool('circle');  s.clearInteraction(); break;
+        case 'i': case 'I': s.setTool('ink');     s.clearInteraction(); break;
+        case 'p': case 'P': s.setTool('polygon'); s.clearInteraction(); break;
+        case 'v': case 'V': // V for "select" — S is too easy to fat-finger near 'A'/'D'
+        case 's': case 'S': s.setTool('select');  s.clearInteraction(); break;
+        case 'h': case 'H': s.setShowCons((x) => !x); break;
+        case 'r': case 'R': s.recenter(); break;
+        case '+': case '=':
+          s.zoomAt(s.containerSize.w / 2, s.containerSize.h / 2, 1.2);
+          break;
+        case '-': case '_':
+          s.zoomAt(s.containerSize.w / 2, s.containerSize.h / 2, 1 / 1.2);
+          break;
+        default: return;
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   // ============================ INK PATHS (RENDER MEMO) ============================
   // Normalises every ink record into the common shape consumed by <StrokedShape>:
