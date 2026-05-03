@@ -1,14 +1,35 @@
 import { useCallback, useEffect, useState } from 'react';
 import { STORAGE_KEY } from '../constants.js';
+import { edgeToShape } from '../tiles/transform.js';
 
 // Owns the five "document" slices (the things the user explicitly created and
 // that get persisted), plus an undo/redo stack and localStorage save/load.
 // Saves are debounced so a continuous drag doesn't write to disk every frame.
 
+// Bumped whenever the persisted tile shape changes. `migrate()` runs on load
+// and brings older snapshots up to the current version, so users don't lose
+// their work across schema changes.
+const DOC_VERSION = 2;
+
+// v1 → v2: boundary edges are now part of `inks` rather than being a separate
+// dark stroke. Synthesise one ink per edge so old tiles render the same way.
+function migrate(s) {
+  if (!s) return s;
+  const v = s.version ?? 1;
+  if (v >= DOC_VERSION) return s;
+  const tiles = (s.tiles || []).map((t) => {
+    const boundaryInks = (t.edges || [])
+      .map((e) => edgeToShape(e, t.vertices))
+      .filter(Boolean);
+    return { ...t, inks: [...boundaryInks, ...(t.inks || [])] };
+  });
+  return { ...s, tiles, version: DOC_VERSION };
+}
+
 const loadInitial = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return raw ? migrate(JSON.parse(raw)) : null;
   } catch (e) {
     // Malformed JSON, quota errors, or sandboxed/private contexts — skip.
     return null;
@@ -32,7 +53,10 @@ export function useDocument() {
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ lines, circles, inks, tiles, placed }));
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ version: DOC_VERSION, lines, circles, inks, tiles, placed }),
+        );
       } catch (e) { /* quota / private mode — drop the save */ }
     }, 400);
     return () => clearTimeout(t);

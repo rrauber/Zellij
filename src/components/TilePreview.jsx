@@ -16,7 +16,6 @@ export default function TilePreview({ tile, onUse, onDelete }) {
   const w = maxX - minX + 2 * pad;
   const h = maxY - minY + 2 * pad;
   const size = 100;
-  const strokeBoundary = Math.max(w, h) / 60;
   const strokeInk = Math.max(w, h) / 50;
 
   return (
@@ -27,7 +26,7 @@ export default function TilePreview({ tile, onUse, onDelete }) {
         style={{ background: '#F1E9D6', border: '1px solid #3A2E1F', padding: '4px' }}
       >
         <svg width={size} height={size} viewBox={`${minX - pad} ${minY - pad} ${w} ${h}`}>
-          <path d={tilePathD(tile)} fill="rgba(225,200,150,0.4)" stroke="#3A2E1F" strokeWidth={strokeBoundary} />
+          <path d={tilePathD(tile)} fill="rgba(225,200,150,0.4)" stroke="none" />
           {tile.inks.map((ink, i) => {
             if (ink.type === 'line') {
               return (

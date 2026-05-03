@@ -10,11 +10,12 @@ import {
 } from '../geometry/vec.js';
 import { projOnSeg, projOnCircle, isAngleBetween, pointInPoly } from '../geometry/project.js';
 import { computeIntersections, getLineSegments, getCircleArcs } from '../geometry/intersections.js';
-import { arcPathCCW, arcMidPointCCW } from '../geometry/arc.js';
+import { arcPathCCW } from '../geometry/arc.js';
+import { clipLineByPolygon, clipArcByPolygon, clipWholeCircleByPolygon } from '../geometry/clip.js';
 import { newId } from '../geometry/id.js';
 
 import { tilePathD } from '../tiles/tilePath.js';
-import { transformPoint } from '../tiles/transform.js';
+import { transformPoint, transformShape, translateShape, edgeToShape } from '../tiles/transform.js';
 
 import { useDocument } from '../hooks/useDocument.js';
 import { useContainerSize } from '../hooks/useContainerSize.js';
@@ -448,134 +449,162 @@ export default function ZellijApp() {
     }
   };
 
+  // Promote the closed cycle into a tile. The new tile bundles, in tile-local coords:
+  //   - vertices/edges (boundary topology — used for tilePathD shape and hit tests)
+  //   - inks: every visible stroke. Includes one ink per boundary edge (the boundary
+  //           IS an inked construction line), every canvas ink inside the polygon,
+  //           and the inks of any placed tile whose centroid was inside (flattened).
+  //   - construction: faint scaffold sub-segments inside, properly clipped at the
+  //           polygon boundary so they don't bleed past the new tile's outline.
+  // Placed tiles whose centroid lies inside the polygon are baked into the new tile
+  // and removed from the canvas (snapshot semantics, no nested data structure).
   const finalizePolygon = (cycle) => {
     pushUndo();
+
+    // ---- 1. Boundary topology + centroid ----
     const vertices = cycle.map((c) => c.from);
     const edges = cycle.map((c, i) => {
       if (c.seg.type === 'lineSeg') {
         return { type: 'line', from: i, to: (i + 1) % cycle.length };
       }
-      // arc edge — sweepCCW=true ⇒ traverse same direction as original CCW arc (ang1 → ang2)
-      const center = c.seg.center;
-      const radius = c.seg.radius;
-      const fromAngle = angBetween(center, c.from);
-      const toAngle = angBetween(center, c.to);
+      // Arc edge: sweepCCW=true ⇒ traverse same direction as the original CCW arc.
+      const center = c.seg.center, radius = c.seg.radius;
       return {
         type: 'arc', from: i, to: (i + 1) % cycle.length,
-        center, radius, fromAngle, toAngle, sweepCCW: !!c.forward,
+        center, radius,
+        fromAngle: angBetween(center, c.from),
+        toAngle:   angBetween(center, c.to),
+        sweepCCW: !!c.forward,
       };
     });
 
-    // Center the tile at its centroid.
     const cx = vertices.reduce((s, v) => s + v.x, 0) / vertices.length;
     const cy = vertices.reduce((s, v) => s + v.y, 0) / vertices.length;
-    const localVerts = vertices.map((v) => ({ x: v.x - cx, y: v.y - cy }));
-    const localEdges = edges.map((e) => {
-      if (e.type === 'arc') return { ...e, center: { x: e.center.x - cx, y: e.center.y - cy } };
-      return e;
+    const toLocal = (shape) => translateShape(shape, -cx, -cy);
+    const polyVerts = vertices;
+
+    // Boundary as stroked-shape edges in WORLD coords — used both for clipping
+    // construction/inks and as the source of the boundary inks themselves.
+    const polyEdgesWorld = cycle.map((c) => {
+      if (c.seg.type === 'lineSeg') return { type: 'line', a: c.from, b: c.to };
+      // Arc geometry is the same regardless of c.forward; CCW from seg.ang1 → seg.ang2.
+      return { type: 'arc', center: c.seg.center, radius: c.seg.radius, ang1: c.seg.ang1, ang2: c.seg.ang2 };
     });
 
-    // Inks inside the polygon, copied into tile-local coords.
-    const polyVerts = vertices;
+    // ---- 2. Boundary inks (one per polygon edge) ----
+    const boundaryInks = polyEdgesWorld.map(toLocal);
+
+    // ---- 3. Canvas inks inside the polygon, clipped at boundary ----
     const inksInside = [];
+    const captureClipped = (worldShape, sink) => {
+      if (worldShape.type === 'line') {
+        for (const piece of clipLineByPolygon(worldShape.a, worldShape.b, polyVerts, polyEdgesWorld)) {
+          sink.push(toLocal({ type: 'line', a: piece.a, b: piece.b }));
+        }
+      } else if (worldShape.type === 'arc') {
+        const pieces = clipArcByPolygon(worldShape.center, worldShape.radius, worldShape.ang1, worldShape.ang2, polyVerts, polyEdgesWorld);
+        for (const p of pieces) {
+          sink.push(toLocal({ type: 'arc', center: worldShape.center, radius: worldShape.radius, ang1: p.ang1, ang2: p.ang2 }));
+        }
+      } else if (worldShape.type === 'wholeCircle') {
+        const pieces = clipWholeCircleByPolygon(worldShape.center, worldShape.radius, polyVerts, polyEdgesWorld);
+        for (const p of pieces) {
+          if (p.type === 'wholeCircle') {
+            sink.push(toLocal({ type: 'wholeCircle', center: worldShape.center, radius: worldShape.radius }));
+          } else {
+            sink.push(toLocal({ type: 'arc', center: worldShape.center, radius: worldShape.radius, ang1: p.ang1, ang2: p.ang2 }));
+          }
+        }
+      }
+    };
+
+    // Convert each canvas ink record (lineId-based / circleId-based) into a
+    // world-space stroked-shape, then clip + capture.
     for (const ink of inks) {
-      if (!isInkInsidePolygon(ink, polyVerts)) continue;
       if (ink.type === 'lineSeg') {
         const L = lines[ink.lineId];
         if (!L) continue;
-        const a = lerp(L.p1, L.p2, ink.t1);
-        const b = lerp(L.p1, L.p2, ink.t2);
-        inksInside.push({ type: 'line', a: { x: a.x - cx, y: a.y - cy }, b: { x: b.x - cx, y: b.y - cy } });
+        captureClipped({ type: 'line', a: lerp(L.p1, L.p2, ink.t1), b: lerp(L.p1, L.p2, ink.t2) }, inksInside);
       } else if (ink.type === 'arc') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        inksInside.push({
-          type: 'arc',
-          center: { x: C.center.x - cx, y: C.center.y - cy },
-          radius: C.radius, ang1: ink.ang1, ang2: ink.ang2,
-        });
+        captureClipped({ type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2 }, inksInside);
       } else if (ink.type === 'wholeCircle') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        inksInside.push({
-          type: 'wholeCircle',
-          center: { x: C.center.x - cx, y: C.center.y - cy },
-          radius: C.radius,
-        });
+        captureClipped({ type: 'wholeCircle', center: C.center, radius: C.radius }, inksInside);
       }
     }
 
-    // Construction lines/arcs/whole-circles inside the polygon. We test sub-segment midpoints,
-    // which is robust except along boundary edges where the test is unstable — those render
-    // under the dark tile boundary stroke anyway, so the visual outcome is fine either way.
+    // ---- 4. Construction sub-segments inside, clipped at boundary ----
+    // Without clipping, a sub-segment that straddles the boundary either gets
+    // accepted whole (extending past the tile) or rejected whole (a piece that
+    // *should* be inside disappears). Clipping keeps every piece's geometry
+    // honest and preserves canonical intersection points for sub-segments that
+    // share a pid (their endpoints stay fp-exact).
     const constructionInside = [];
     for (const id in lineHits) {
-      const segs = getLineSegments(lineHits, id);
-      for (const s of segs) {
-        const mid = lerp(s.a, s.b, 0.5);
-        if (pointInPoly(mid, polyVerts)) {
-          constructionInside.push({
-            type: 'line',
-            a: { x: s.a.x - cx, y: s.a.y - cy },
-            b: { x: s.b.x - cx, y: s.b.y - cy },
-          });
-        }
+      for (const s of getLineSegments(lineHits, id)) {
+        captureClipped({ type: 'line', a: s.a, b: s.b }, constructionInside);
       }
     }
     for (const id in circleHits) {
       const C = circles[id];
       if (!C) continue;
-      const arcs = getCircleArcs(circleHits, id, C);
-      for (const arc of arcs) {
-        const midP = arcMidPointCCW(C.center, C.radius, arc.ang1, arc.ang2);
-        if (pointInPoly(midP, polyVerts)) {
-          constructionInside.push({
-            type: 'arc',
-            center: { x: C.center.x - cx, y: C.center.y - cy },
-            radius: C.radius, ang1: arc.ang1, ang2: arc.ang2,
-          });
-        }
+      for (const arc of getCircleArcs(circleHits, id, C)) {
+        captureClipped({ type: 'arc', center: C.center, radius: C.radius, ang1: arc.ang1, ang2: arc.ang2 }, constructionInside);
       }
     }
-    // Whole-circle construction (no intersections): include if center is inside polygon.
-    // Such a circle is either entirely inside or entirely outside (no intersections),
-    // so the center test alone suffices.
+    // Whole-circle construction (no intersections): the clip helper will keep
+    // it whole if the centre is inside, or split it into arcs if a polygon
+    // edge happens to clip through it.
     for (const id in circles) {
+      if ((circleHits[id] || []).length > 0) continue;
       const C = circles[id];
-      const hits = circleHits[id] || [];
-      if (hits.length === 0 && pointInPoly(C.center, polyVerts)) {
-        constructionInside.push({
-          type: 'wholeCircle',
-          center: { x: C.center.x - cx, y: C.center.y - cy },
-          radius: C.radius,
-        });
+      captureClipped({ type: 'wholeCircle', center: C.center, radius: C.radius }, constructionInside);
+    }
+
+    // ---- 5. Flatten placed tiles whose centroid is inside ----
+    // A placed tile here represents a stamp the user assembled; once captured
+    // it's baked in (its boundary becomes inks, its inks/construction transform
+    // into the new tile's local coords) and removed from the canvas.
+    const flattenedInks = [];
+    const flattenedCons = [];
+    const removedPlacedIds = new Set();
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      const centroidWorld = transformPoint({ x: 0, y: 0 }, pt); // tile-local origin = its centroid
+      if (!pointInPoly(centroidWorld, polyVerts)) continue;
+      removedPlacedIds.add(pt.id);
+      // The flattened inks/construction can extend past the polygon if the
+      // placed tile only partially overlaps it, so clip them too.
+      for (const ink of tile.inks) captureClipped(transformShape(ink, pt), flattenedInks);
+      for (const c   of tile.construction) captureClipped(transformShape(c, pt), flattenedCons);
+      // Boundary edges of the constituent tile become inks at the meta level.
+      for (const e of tile.edges) {
+        const localShape = edgeToShape(e, tile.vertices);
+        if (localShape) captureClipped(transformShape(localShape, pt), flattenedInks);
       }
     }
+
+    // ---- 6. Compose the new tile, update state ----
+    const localVerts = vertices.map((v) => ({ x: v.x - cx, y: v.y - cy }));
+    const localEdges = edges.map((e) =>
+      e.type === 'arc' ? { ...e, center: { x: e.center.x - cx, y: e.center.y - cy } } : e
+    );
 
     setTiles((T) => [...T, {
-      id: newId(), vertices: localVerts, edges: localEdges,
-      inks: inksInside, construction: constructionInside,
+      id: newId(),
+      vertices: localVerts,
+      edges: localEdges,
+      inks: [...boundaryInks, ...inksInside, ...flattenedInks],
+      construction: [...constructionInside, ...flattenedCons],
     }]);
-    setSheetOpen(true);
-  };
-
-  // Approximate "ink inside polygon": midpoint of the ink inside the polygon.
-  const isInkInsidePolygon = (ink, polyVerts) => {
-    let pt;
-    if (ink.type === 'lineSeg') {
-      const L = lines[ink.lineId];
-      if (!L) return false;
-      const a = lerp(L.p1, L.p2, ink.t1);
-      const b = lerp(L.p1, L.p2, ink.t2);
-      pt = lerp(a, b, 0.5);
-    } else if (ink.type === 'arc') {
-      const C = circles[ink.circleId];
-      if (!C) return false;
-      pt = arcMidPointCCW(C.center, C.radius, ink.ang1, ink.ang2);
-    } else {
-      return false;
+    if (removedPlacedIds.size > 0) {
+      setPlaced((P) => P.filter((p) => !removedPlacedIds.has(p.id)));
     }
-    return pointInPoly(pt, polyVerts);
+    setSheetOpen(true);
   };
 
   // Initial center when first loaded
@@ -886,8 +915,10 @@ export default function ZellijApp() {
               const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
               return (
                 <g key={pt.id} transform={transform}>
-                  <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="#3A2E1F"
-                    strokeWidth={1.8 / view.scale} strokeLinejoin="round" />
+                  {/* Tile silhouette — fill only. The visible outline is provided by the
+                      boundary inks captured at finalize time, so it renders at the same
+                      stroke weight/colour as any other ink. */}
+                  <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="none" />
                   {showCons && tile.construction && tile.construction.map((c, i) => (
                     <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
