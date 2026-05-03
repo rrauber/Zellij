@@ -1097,7 +1097,7 @@ export default function ZellijApp() {
         onSelectColor={setSelectedColor}
       />
 
-      <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ background: '#F1E9D6' }}>
+      <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ background: COLOR.canvas }}>
         <svg
           ref={svgRef}
           width="100%"
@@ -1286,7 +1286,7 @@ export default function ZellijApp() {
                     key={`sp-${i}`}
                     cx={p.x} cy={p.y}
                     r={(sel ? 10 : 7) / view.scale}
-                    fill={sel ? '#C58A3A' : '#F1E9D6'}
+                    fill={sel ? '#C58A3A' : COLOR.canvas}
                     stroke="#3A2E1F"
                     strokeWidth={(sel ? 2.5 : 1.2) / view.scale}
                     style={{ cursor: 'pointer' }}
@@ -1669,7 +1669,7 @@ function Handle({ h, scale }) {
           strokeDasharray={`${3 / scale} ${3 / scale}`} />
       )}
       <circle cx={h.x} cy={h.y} r={HANDLE_R / scale}
-        fill="#F1E9D6" stroke="#3A2E1F" strokeWidth={1.5 / scale} />
+        fill={COLOR.canvas} stroke="#3A2E1F" strokeWidth={1.5 / scale} />
       {h.kind === 'rotate'   && <circle cx={h.x} cy={h.y} r={(HANDLE_R - 6) / scale} fill="#3A2E1F" />}
       {h.kind === 'lengthen' && <line x1={h.x - 5 / scale} y1={h.y} x2={h.x + 5 / scale} y2={h.y} stroke="#3A2E1F" strokeWidth={2 / scale} />}
       {h.kind === 'lengthen' && <line x1={h.x} y1={h.y - 5 / scale} x2={h.x} y2={h.y + 5 / scale} stroke="#3A2E1F" strokeWidth={2 / scale} />}

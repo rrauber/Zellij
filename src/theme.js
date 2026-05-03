@@ -29,8 +29,13 @@ export const COLOR = {
   accentSoft:    '#E8C58A',  // disabled/secondary accent
   danger:        '#DC2626',  // clear / delete (cleaner red than burgundy)
 
-  // ---- Canvas (artwork side, preserved) ----
-  canvas:        '#F1E9D6',
+  // ---- Canvas (artwork side) ----
+  // Subtle warm-leaning very-light gray. Distinct from chrome (it's slightly
+  // darker, reads as a "drawing surface" beneath the panels) without being
+  // overtly parchment. The translucent tile silhouette tint still composites
+  // to a hair warmer than the canvas, preserving the polygon-over-canvas
+  // contrast we liked from the original.
+  canvas:        '#EFEDE8',
   tileFill:      'rgba(225,200,150,0.25)',
   ink:           '#1B1B1B',
   construction:  '#9C8A6A',
