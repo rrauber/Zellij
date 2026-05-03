@@ -2,60 +2,43 @@ import { useCallback, useEffect, useState } from 'react';
 import { STORAGE_KEY } from '../constants.js';
 
 // Owns the five "document" slices (the things the user explicitly created and
-// that get persisted), plus an undo/redo stack and async load/save.
-//
-// Persistence uses `window.storage` if present (the surrounding harness's
-// async storage API). Saves are debounced so rapid edits coalesce.
+// that get persisted), plus an undo/redo stack and localStorage save/load.
+// Saves are debounced so a continuous drag doesn't write to disk every frame.
+
+const loadInitial = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    // Malformed JSON, quota errors, or sandboxed/private contexts — skip.
+    return null;
+  }
+};
+
 export function useDocument() {
-  const [lines, setLines] = useState({});
-  const [circles, setCircles] = useState({});
-  const [inks, setInks] = useState([]);
-  const [tiles, setTiles] = useState([]);
-  const [placed, setPlaced] = useState([]);
-  const [loaded, setLoaded] = useState(false);
+  // Single sync read at mount; the lazy initializer keeps subsequent renders cheap.
+  const [initial] = useState(loadInitial);
+  const [lines,   setLines]   = useState(() => initial?.lines   ?? {});
+  const [circles, setCircles] = useState(() => initial?.circles ?? {});
+  const [inks,    setInks]    = useState(() => initial?.inks    ?? []);
+  const [tiles,   setTiles]   = useState(() => initial?.tiles   ?? []);
+  const [placed,  setPlaced]  = useState(() => initial?.placed  ?? []);
 
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
 
-  // Load on mount
+  // Save (debounced). The first effect run rewrites the same JSON we just
+  // loaded — harmless and saves us a "loaded" gate.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        if (window.storage?.get) {
-          const result = await window.storage.get(STORAGE_KEY);
-          if (!cancelled && result?.value) {
-            const s = typeof result.value === 'string' ? JSON.parse(result.value) : result.value;
-            if (s.lines) setLines(s.lines);
-            if (s.circles) setCircles(s.circles);
-            if (s.inks) setInks(s.inks);
-            if (s.tiles) setTiles(s.tiles);
-            if (s.placed) setPlaced(s.placed);
-          }
-        }
-      } catch (e) { /* missing key or unavailable - fine */ }
-      if (!cancelled) setLoaded(true);
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  // Save (debounced) — only after initial load completes so we don't clobber
-  // saved state with the empty defaults during the first render.
-  useEffect(() => {
-    if (!loaded) return;
     const t = setTimeout(() => {
-      (async () => {
-        try {
-          if (window.storage?.set) {
-            await window.storage.set(STORAGE_KEY, JSON.stringify({ lines, circles, inks, tiles, placed }));
-          }
-        } catch (e) { /* ignore */ }
-      })();
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ lines, circles, inks, tiles, placed }));
+      } catch (e) { /* quota / private mode — drop the save */ }
     }, 400);
     return () => clearTimeout(t);
-  }, [lines, circles, inks, tiles, placed, loaded]);
+  }, [lines, circles, inks, tiles, placed]);
 
-  // Undo/redo. pushUndo captures the *current* state — so call it BEFORE the
+  // Undo/redo. pushUndo captures the *current* state — call it BEFORE the
   // mutation. Stack capped at 50 entries.
   const pushUndo = useCallback(() => {
     setUndoStack((s) => [...s.slice(-50), { lines, circles, inks, tiles, placed }]);
@@ -94,7 +77,6 @@ export function useDocument() {
     inks, setInks,
     tiles, setTiles,
     placed, setPlaced,
-    loaded,
     pushUndo, undo, redo,
     canUndo: undoStack.length > 0,
     canRedo: redoStack.length > 0,
