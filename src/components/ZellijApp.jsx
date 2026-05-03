@@ -29,6 +29,7 @@ import { useContainerSize } from '../hooks/useContainerSize.js';
 import Toolbar from './Toolbar.jsx';
 import StatusBar from './StatusBar.jsx';
 import Inventory from './Inventory.jsx';
+import CanvasRenderer from './CanvasRenderer.jsx';
 
 export default function ZellijApp() {
   // ============================ STATE ============================
@@ -169,7 +170,9 @@ export default function ZellijApp() {
   //
   // Keyed by `${placedId}:${edgeIdx}` so the per-tile render can quickly check
   // whether to skip a given edge.
+  const cachedSharedEdgesRef = useRef(new Set());
   const sharedEdgeKeys = useMemo(() => {
+    if (isDragging) return cachedSharedEdgesRef.current;
     if (placed.length < 2) return new Set();
     const all = []; // [{ key, worldShape }]
     for (const pt of placed) {
@@ -191,8 +194,9 @@ export default function ZellijApp() {
         }
       }
     }
+    cachedSharedEdgesRef.current = shared;
     return shared;
-  }, [placed, tiles]);
+  }, [placed, tiles, isDragging]);
 
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
   // pick the smallest containing face (most specific region). The graph build
@@ -241,30 +245,30 @@ export default function ZellijApp() {
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
-      // Each visible stroke as a world-space shape: boundary edges (whether
-      // currently inked or not), plus interior inks, plus faint construction.
-      // Listing edges *and* inks may double-count boundary intersections when
-      // an edge is inked (its matching shape lives in inks too) — but
-      // intersectShapes returns nothing for coincident shapes, so the practical
-      // result is just a few wasted comparisons, not spurious snap points.
+
+      const edgesCount = (tile.edges || []).length;
+      const inksCount = (tile.inks || []).length;
+      
       const tileShapes = [
-        ...(tile.edges || []).map((e) => edgeToShape(e, tile.vertices)).filter(Boolean),
-        ...(tile.inks || []),
-        ...(tile.construction || []),
-      ].map((s) => transformShape(s, pt));
+        ...(tile.edges || []).map((e) => ({ shape: edgeToShape(e, tile.vertices), isCons: false })),
+        ...(tile.inks || []).map((s) => ({ shape: s, isCons: false })),
+        ...(tile.construction || []).map((s) => ({ shape: s, isCons: true })),
+      ].filter(x => x.shape).map((x) => ({ shape: transformShape(x.shape, pt), isCons: x.isCons }));
+
       // Pairwise within this placed tile.
       for (let i = 0; i < tileShapes.length; i++) {
         for (let j = i + 1; j < tileShapes.length; j++) {
-          for (const p of intersectShapes(tileShapes[i], tileShapes[j])) {
-            out.push({ x: p.x, y: p.y, kind: 'tile-intersection' });
+          const isConsCrossing = tileShapes[i].isCons || tileShapes[j].isCons;
+          for (const p of intersectShapes(tileShapes[i].shape, tileShapes[j].shape)) {
+            out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: isConsCrossing });
           }
         }
       }
-      // Each tile shape vs every canvas shape.
+      // Each tile shape vs every canvas shape (canvas shapes are always construction).
       for (const ts of tileShapes) {
         for (const cs of canvasShapes) {
-          for (const p of intersectShapes(ts, cs)) {
-            out.push({ x: p.x, y: p.y, kind: 'tile-intersection' });
+          for (const p of intersectShapes(ts.shape, cs)) {
+            out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: true });
           }
         }
       }
@@ -273,19 +277,23 @@ export default function ZellijApp() {
     return out;
   }, [placed, tiles, lines, circles, isDragging]);
 
-  // Returns: { points: [{x,y, kind}], lines1D: [...], circles1D: [...] }
-  const computeSnapTargets = useCallback(() => {
+  // Returns: { points: [{x,y, kind}], lines1D: [...], circles1D: [...], grid: Map, gridSize }
+  const snapTargets = useMemo(() => {
     const points = [];
-    for (const p of intersections) points.push({ x: p.x, y: p.y, kind: 'intersection' });
-    for (const id in lines) {
-      points.push({ x: lines[id].p1.x, y: lines[id].p1.y, kind: 'endpoint' });
-      points.push({ x: lines[id].p2.x, y: lines[id].p2.y, kind: 'endpoint' });
+
+    if (showCons) {
+      for (const p of intersections) points.push({ x: p.x, y: p.y, kind: 'intersection' });
+      for (const id in lines) {
+        points.push({ x: lines[id].p1.x, y: lines[id].p1.y, kind: 'endpoint' });
+        points.push({ x: lines[id].p2.x, y: lines[id].p2.y, kind: 'endpoint' });
+      }
+      for (const id in circles) {
+        points.push({ x: circles[id].center.x, y: circles[id].center.y, kind: 'center' });
+        const rPt = circles[id].radiusPt;
+        if (rPt) points.push({ x: rPt.x, y: rPt.y, kind: 'radius-point' });
+      }
     }
-    for (const id in circles) {
-      points.push({ x: circles[id].center.x, y: circles[id].center.y, kind: 'center' });
-      const rPt = circles[id].radiusPt;
-      if (rPt) points.push({ x: rPt.x, y: rPt.y, kind: 'radius-point' });
-    }
+
     // Placed-tile vertices, tagged with placedId so a tile can't snap to itself.
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
@@ -295,27 +303,63 @@ export default function ZellijApp() {
         points.push({ x: w.x, y: w.y, kind: 'tile-vertex', placedId: pt.id });
       }
     }
+
     // Crossings of tile-interior strokes (with each other and with canvas).
-    for (const p of tileIntersectionPoints) points.push(p);
+    // tileIntersectionPoints already handles its own internal showCons-like logic 
+    // but we should probably filter it here if it contains construction crossings.
+    for (const p of tileIntersectionPoints) {
+      // If construction is hidden, skip points that were specifically tagged as tile-construction.
+      if (!showCons && p.isConstruction) continue;
+      points.push(p);
+    }
+
+    // Spatial Index (Uniform Grid)
+    const gridSize = 50;
+    const grid = new Map();
+    for (const p of points) {
+      const gx = Math.floor(p.x / gridSize);
+      const gy = Math.floor(p.y / gridSize);
+      const key = `${gx},${gy}`;
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key).push(p);
+    }
+
     return {
       points,
-      lines1D: Object.entries(lines).map(([id, l]) => ({ id, ...l })),
-      circles1D: Object.entries(circles).map(([id, c]) => ({ id, ...c })),
+      grid,
+      gridSize,
+      lines1D: showCons ? Object.entries(lines).map(([id, l]) => ({ id, ...l })) : [],
+      circles1D: showCons ? Object.entries(circles).map(([id, c]) => ({ id, ...c })) : [],
     };
-  }, [intersections, lines, circles, placed, tiles, tileIntersectionPoints]);
+  }, [intersections, lines, circles, placed, tiles, tileIntersectionPoints, showCons]);
 
   // Find the best snap for a world-coord point. Priority: 0D points > 1D lines/circles > free.
   const trySnap = useCallback((worldP, opts = {}) => {
     const radiusWorld = SNAP_PX / view.scale;
-    const targets = computeSnapTargets();
+    const targets = snapTargets;
     let best = null;
-    for (const t of targets.points) {
-      const d = dist(worldP, t);
-      if (d < radiusWorld && (!best || d < best.dist)) {
-        best = { x: t.x, y: t.y, dist: d, kind: t.kind };
+
+    // Spatial query: check current bucket + neighbors
+    const { grid, gridSize } = targets;
+    const gx = Math.floor(worldP.x / gridSize);
+    const gy = Math.floor(worldP.y / gridSize);
+    
+    for (let ix = gx - 1; ix <= gx + 1; ix++) {
+      for (let iy = gy - 1; iy <= gy + 1; iy++) {
+        const bucket = grid.get(`${ix},${iy}`);
+        if (!bucket) continue;
+        for (const t of bucket) {
+          const dx = worldP.x - t.x, dy = worldP.y - t.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < radiusWorld * radiusWorld && (!best || d2 < best.distSq)) {
+            best = { x: t.x, y: t.y, distSq: d2, kind: t.kind };
+          }
+        }
       }
     }
-    if (best) return best;
+
+    if (best) return { ...best, dist: Math.sqrt(best.distSq) };
+    
     if (opts.allow1D !== false) {
       for (const l of targets.lines1D) {
         const proj = projOnSeg(worldP, l.p1, l.p2);
@@ -331,7 +375,7 @@ export default function ZellijApp() {
       }
     }
     return best || { x: worldP.x, y: worldP.y, kind: 'free' };
-  }, [view, computeSnapTargets]);
+  }, [view, snapTargets]);
 
   // ============================ POINTER HANDLING ============================
   const getEventPos = (e) => {
@@ -802,6 +846,24 @@ export default function ZellijApp() {
       return { type: 'arc', center: c.seg.center, radius: c.seg.radius, ang1: c.seg.ang1, ang2: c.seg.ang2 };
     });
 
+    // Bounding box for culling
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of vertices) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    // Arcs can extend beyond their endpoints
+    for (const edge of polyEdgesWorld) {
+      if (edge.type === 'arc') {
+        const { center, radius } = edge;
+        // Simple but safe: use the whole circle's bbox for the arc
+        if (center.x - radius < minX) minX = center.x - radius;
+        if (center.x + radius > maxX) maxX = center.x + radius;
+        if (center.y - radius < minY) minY = center.y - radius;
+        if (center.y + radius > maxY) maxY = center.y + radius;
+      }
+    }
+
     // ---- 2. Boundary inks: only edges whose source segment was inked ----
     // The user controls boldness by inking before tracing. Inked construction
     // → bold tile boundary at that edge. Un-inked source → faint tile outline
@@ -812,10 +874,34 @@ export default function ZellijApp() {
       boundaryInks.push(toLocal(polyEdgesWorld[i]));
     }
 
-    // ---- 3. Canvas inks inside the polygon, clipped at boundary ----
-    const inksInside = [];
     const captureClipped = (worldShape, sink) => {
+      // Fast bounding box check
+      let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
       if (worldShape.type === 'line') {
+        sMinX = Math.min(worldShape.a.x, worldShape.b.x);
+        sMaxX = Math.max(worldShape.a.x, worldShape.b.x);
+        sMinY = Math.min(worldShape.a.y, worldShape.b.y);
+        sMaxY = Math.max(worldShape.a.y, worldShape.b.y);
+      } else if (worldShape.type === 'arc' || worldShape.type === 'wholeCircle') {
+        sMinX = worldShape.center.x - worldShape.radius;
+        sMaxX = worldShape.center.x + worldShape.radius;
+        sMinY = worldShape.center.y - worldShape.radius;
+        sMaxY = worldShape.center.y + worldShape.radius;
+      }
+
+      if (sMaxX < minX || sMinX > maxX || sMaxY < minY || sMinY > maxY) return;
+
+      // If the shape is entirely inside the bbox, check if it's entirely inside the polygon
+      // This is still slightly heuristic but handles most common small shapes.
+      const isPointInPoly = (p) => pointInPoly(p, polyVerts);
+      
+      if (worldShape.type === 'line') {
+        if (isPointInPoly(worldShape.a) && isPointInPoly(worldShape.b)) {
+          // If both endpoints are in, and it's a convex polygon, the whole line is in.
+          // Since our polygons can be concave, we only do this for "very safe" cases 
+          // or just proceed to clipping. Actually, clipping is the most robust.
+          // Let's just stick to the bbox culling for now as it's the safest.
+        }
         for (const piece of clipLineByPolygon(worldShape.a, worldShape.b, polyVerts, polyEdgesWorld)) {
           sink.push(toLocal({ type: 'line', a: piece.a, b: piece.b }));
         }
@@ -1118,12 +1204,17 @@ export default function ZellijApp() {
   // Build the visual-only handle list for the current editing target. The SVG's
   // pointerdown picks the nearest handle and dispatches drag; the handle's
   // onMove receives the snapped/free world point and applies the edit.
-  const handles = buildHandles({
+  const handles = useMemo(() => buildHandles({
     editing, lines, circles, placed, tiles, view,
     updateLine, updateCircle, setPlaced,
-    computeSnapTargets, setSnapIndicator,
+    snapTargets, setSnapIndicator,
     rotationStepRad,
-  });
+  }), [
+    editing, lines, circles, placed, tiles, view,
+    updateLine, updateCircle, setPlaced,
+    snapTargets, setSnapIndicator,
+    rotationStepRad
+  ]);
 
   // ============================ RENDER ============================
   const showSnapButtons = (tool === 'line' || tool === 'circle');
@@ -1167,10 +1258,9 @@ export default function ZellijApp() {
       />
 
       <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ background: COLOR.canvas }}>
-        <svg
+        <div
           ref={svgRef}
-          width="100%"
-          height="100%"
+          style={{ width: '100%', height: '100%', touchAction: 'none' }}
           onPointerDown={(e) => {
             // Defensive: if a child handler has already initiated a non-pan action
             // for this pointerdown, don't override it.
@@ -1200,6 +1290,26 @@ export default function ZellijApp() {
               }
             }
 
+            if (showSnapButtons && ptrState.current.pointers.size === 0) {
+              const targets = snapTargets;
+              const hitRadiusWorld = 10 / view.scale;
+              let hitSnap = null;
+              for (const p of targets.points) {
+                if (dist(worldP, p) < hitRadiusWorld) {
+                  hitSnap = p;
+                  break;
+                }
+              }
+              if (hitSnap) {
+                e.target.setPointerCapture?.(e.pointerId);
+                ptrState.current.pointers.set(e.pointerId, {
+                  ...pos, downAt: Date.now(), moved: false, startScreen: pos, startWorld: hitSnap,
+                });
+                ptrState.current.action = { kind: 'pan', startScreen: pos, startView: { ...view } };
+                return;
+              }
+            }
+
             ptrState.current.pointers.set(e.pointerId, {
               ...pos, downAt: Date.now(), moved: false, startScreen: pos, startWorld: worldP,
             });
@@ -1219,237 +1329,31 @@ export default function ZellijApp() {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
-          <g transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}>
-            {/* ---- Under-pass for placed tiles ----
-                Un-inked tile edges only — these are faint outlines that
-                should be hidden under colour fills (so a coloured region
-                doesn't show stray seams) but visible in un-coloured areas.
-                Shared seams between adjacent tiles are already dropped
-                via sharedEdgeKeys. */}
-            {placed.map((pt) => {
-              const tile = tiles.find((t) => t.id === pt.tileId);
-              if (!tile) return null;
-              const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
-              const uninkedEdgeShapes = tile.edges
-                .map((e, idx) => {
-                  const s = edgeToShape(e, tile.vertices);
-                  if (!s) return null;
-                  if (tile.inks.some((ink) => shapesEqual(s, ink))) return null;
-                  if (sharedEdgeKeys.has(`${pt.id}:${idx}`)) return null;
-                  return s;
-                })
-                .filter(Boolean);
-              if (uninkedEdgeShapes.length === 0) return null;
-              return (
-                <g key={`bg-${pt.id}`} transform={transform}>
-                  {uninkedEdgeShapes.map((s, i) => (
-                    <StrokedShape key={`ue-${i}`} shape={s}
-                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
-                  ))}
-                </g>
-              );
-            })}
-
-            {/* Coloured face fills — bold version. The silhouette pass below
-                adds a translucent tan wash over them so they read as a
-                subtle, slightly muted colour rather than vivid blocks.
-                Hidden during a handle drag because the underlying face graph
-                is frozen for performance — letting them render at stale
-                positions while their tiles move would look like floating
-                debris. They snap back into place on release. */}
-            {!isDragging && coloredFaces.map((cf, i) => (
-              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
-            ))}
-
-            {/* Combined silhouette wash — every placed tile's outline as a
-                single <path> so the union renders without internal
-                antialias seams. Lays a soft tan tint over both the colour
-                fills (giving them the washed-out paper feel) and the
-                under-pass un-inked edges. */}
-            {combinedSilhouettePath && (
-              <path d={combinedSilhouettePath} fill="rgba(225,200,150,0.25)" stroke="none" />
-            )}
-
-            {/* Canvas construction (faint, global). Above colours/wash so
-                construction is visible over coloured regions for reference. */}
-            {showCons && Object.entries(circles).map(([id, c]) => (
-              <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
-                fill="none" stroke="#9C8A6A" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.4} />
-            ))}
-            {showCons && Object.entries(lines).map(([id, l]) => (
-              <line key={`l-${id}`} x1={l.p1.x} y1={l.p1.y} x2={l.p2.x} y2={l.p2.y}
-                stroke="#9C8A6A" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.4} />
-            ))}
-
-            {/* Per-tile interior construction (also visible over colours). */}
-            {showCons && placed.map((pt) => {
-              const tile = tiles.find((t) => t.id === pt.tileId);
-              if (!tile?.construction?.length) return null;
-              const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
-              return (
-                <g key={`mid-${pt.id}`} transform={transform}>
-                  {tile.construction.map((c, i) => (
-                    <StrokedShape key={`tc-${i}`} shape={c}
-                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
-                  ))}
-                </g>
-              );
-            })}
-
-            {/* Canvas inks */}
-            {inkPaths.map((p, i) => (
-              <StrokedShape key={`ink-${i}`} shape={p}
-                stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
-            ))}
-
-            {/* ---- Over-pass for placed tiles ----
-                Bold inks plus the orange selection indicator. Always on top
-                of fills, wash, and construction so the design's structure
-                reads clearly. */}
-            {placed.map((pt) => {
-              const tile = tiles.find((t) => t.id === pt.tileId);
-              if (!tile) return null;
-              const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
-              return (
-                <g key={`fg-${pt.id}`} transform={transform}>
-                  {tile.inks.map((ink, i) => (
-                    <StrokedShape key={i} shape={ink}
-                      stroke="#1B1B1B" strokeWidth={2} lineCap="round" />
-                  ))}
-                  {editing?.kind === 'placedTile' && editing.id === pt.id && (
-                    <path d={tilePathD(tile)} fill="none" stroke="#C58A3A"
-                      strokeWidth={2.5} strokeDasharray="4 3"
-                      vectorEffect="non-scaling-stroke" />
-                  )}
-                </g>
-              );
-            })}
-
-            {/* Polygon-in-progress preview */}
-            {polyDraft.map((pd, i) => (
-              <StrokedShape key={`pd-${i}`} shape={polyDraftShape(pd)}
-                stroke="#C58A3A" strokeWidth={3} lineCap="round" opacity={0.85} />
-            ))}
-
-            {/* Polygon vertex indicators: next-vertex (filled) and closure-target (ring). */}
-            {polyDraft.length > 0 && (() => {
-              const start = polyDraft[0].from;
-              const next = polyDraft[polyDraft.length - 1].to;
-              const sameAsStart = polyDraft[0].pidFrom !== undefined &&
-                polyDraft[0].pidFrom === polyDraft[polyDraft.length - 1].pidTo;
-              return (
-                <g pointerEvents="none">
-                  <circle cx={start.x} cy={start.y} r={11 / view.scale}
-                    fill="none" stroke="#C58A3A" strokeWidth={2}
-                    strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />
-                  {!sameAsStart && (
-                    <circle cx={next.x} cy={next.y} r={9 / view.scale}
-                      fill="#C58A3A" stroke="#3A2E1F" strokeWidth={1.5}
-                      vectorEffect="non-scaling-stroke" />
-                  )}
-                </g>
-              );
-            })()}
-
-            {/* Rejected polygon-tap feedback. */}
-            {polyRejected && (
-              <StrokedShape shape={polyRejectedShape(polyRejected)}
-                stroke="#8B2E1A" strokeWidth={3.5} lineCap="round" opacity={0.7}
-                pointerEvents="none" />
-            )}
-
-            {/* Draft preview */}
-            {draft?.kind === 'line' && (
-              <circle cx={draft.p1.x} cy={draft.p1.y} r={5 / view.scale} fill="#C58A3A" />
-            )}
-            {draft?.kind === 'circle' && draft.refA && (
-              <circle cx={draft.refA.x} cy={draft.refA.y} r={5 / view.scale} fill="#C58A3A" />
-            )}
-            {draft?.kind === 'circle' && draft.refB && (
-              <>
-                <circle cx={draft.refB.x} cy={draft.refB.y} r={5 / view.scale} fill="#C58A3A" />
-                <line x1={draft.refA.x} y1={draft.refA.y} x2={draft.refB.x} y2={draft.refB.y}
-                  stroke="#C58A3A" strokeWidth={1.5} strokeDasharray="4 3"
-                  vectorEffect="non-scaling-stroke" opacity={0.7} />
-              </>
-            )}
-
-            {/* Snap-target markers (shown in line/circle tools). Tappable: tapping a marker can
-                start a new draft from the exact intersection. Defers to handle-drag if a handle
-                is closer than the marker. Rendered before edit handles so handles draw on top —
-                otherwise a marker at a line endpoint covers the lengthen handle's center. */}
-            {showSnapButtons && (() => {
-              const targets = computeSnapTargets();
-              const shown = [];
-              for (const p of targets.points) {
-                if (!shown.some((q) => dist(q, p) < 1 / view.scale)) shown.push(p);
-              }
-              const isAnchor = (markerPos) => {
-                const tol = 1 / view.scale;
-                if (draft?.kind === 'line' && draft.p1 && dist(markerPos, draft.p1) < tol) return true;
-                if (draft?.kind === 'circle') {
-                  if (draft.refA && dist(markerPos, draft.refA) < tol) return true;
-                  if (draft.refB && dist(markerPos, draft.refB) < tol) return true;
-                }
-                return false;
-              };
-              return shown.map((p, i) => {
-                const sel = isAnchor(p);
-                return (
-                  <circle
-                    key={`sp-${i}`}
-                    cx={p.x} cy={p.y}
-                    r={(sel ? 10 : 7) / view.scale}
-                    fill={sel ? '#C58A3A' : COLOR.canvas}
-                    stroke="#3A2E1F"
-                    strokeWidth={sel ? 2.5 : 1.2}
-                    vectorEffect="non-scaling-stroke"
-                    style={{ cursor: 'pointer' }}
-                    onPointerDown={(e) => {
-                      const pos = getEventPos(e);
-                      const worldP = screenToWorld(pos.x, pos.y);
-                      // Defer to handle drag if any edit handle is closer than this marker.
-                      if (handles.length > 0) {
-                        const hitRadiusWorld = (HANDLE_R + HANDLE_HIT_PAD) / view.scale;
-                        const distToMarker = dist(worldP, p);
-                        let nearestHandleD = Infinity;
-                        for (const h of handles) {
-                          const d = dist(worldP, h);
-                          if (d < nearestHandleD) nearestHandleD = d;
-                        }
-                        if (nearestHandleD < hitRadiusWorld && nearestHandleD <= distToMarker) {
-                          // Don't stopPropagation — let the SVG's nearest-handle handler catch it.
-                          return;
-                        }
-                      }
-                      e.stopPropagation();
-                      e.target.setPointerCapture?.(e.pointerId);
-                      ptrState.current.pointers.set(e.pointerId, {
-                        ...pos, downAt: Date.now(), moved: false, startScreen: pos,
-                        startWorld: { x: p.x, y: p.y },
-                      });
-                      ptrState.current.action = { kind: 'pan', startScreen: pos, startView: { ...view } };
-                    }}
-                  />
-                );
-              });
-            })()}
-
-            {/* Edit-mode handles — drawn after snap markers so a marker at a handle position
-                doesn't cover the handle's centre glyph. */}
-            {handles.map((h, i) => <Handle key={`h-${i}`} h={h} scale={view.scale} />)}
-
-            {/* Snap indicator */}
-            {snapIndicator && (
-              <g>
-                <circle cx={snapIndicator.x} cy={snapIndicator.y} r={10 / view.scale}
-                  fill="none" stroke="#C58A3A" strokeWidth={2}
-                  vectorEffect="non-scaling-stroke" />
-                <circle cx={snapIndicator.x} cy={snapIndicator.y} r={3 / view.scale} fill="#C58A3A" />
-              </g>
-            )}
-          </g>
-        </svg>
+          <CanvasRenderer
+            view={view}
+            lines={lines}
+            circles={circles}
+            placed={placed}
+            tiles={tiles}
+            inks={inks}
+            planarFaces={planarFaces}
+            coloredFaces={coloredFaces}
+            polyDraft={polyDraft}
+            polyRejected={polyRejected}
+            draft={draft}
+            handles={handles}
+            snapIndicator={snapIndicator}
+            snapTargets={showSnapButtons ? snapTargets : null}
+            showSnapButtons={showSnapButtons}
+            showCons={showCons}
+            isDragging={isDragging}
+            containerSize={containerSize}
+            sharedEdgeKeys={sharedEdgeKeys}
+            inkPaths={inkPaths}
+            combinedSilhouettePath={combinedSilhouettePath}
+            editing={editing}
+          />
+        </div>
 
         <Inventory
           tiles={tiles}
@@ -1479,7 +1383,7 @@ export default function ZellijApp() {
 function buildHandles({
   editing, lines, circles, placed, tiles, view,
   updateLine, updateCircle, setPlaced,
-  computeSnapTargets, setSnapIndicator,
+  snapTargets, setSnapIndicator,
   rotationStepRad,
 }) {
   const handles = [];
@@ -1487,7 +1391,7 @@ function buildHandles({
     const L = lines[editing.id];
     if (!L) return handles;
     addLineHandles(handles, L, editing.id, {
-      view, updateLine, computeSnapTargets, setSnapIndicator,
+      view, updateLine, snapTargets, setSnapIndicator,
     });
   } else if (editing?.kind === 'circle') {
     const C = circles[editing.id];
@@ -1497,13 +1401,13 @@ function buildHandles({
     const pt = placed.find((p) => p.id === editing.id);
     const tile = pt && tiles.find((t) => t.id === pt.tileId);
     if (pt && tile) addPlacedTileHandles(handles, pt, tile, editing.id, {
-      view, computeSnapTargets, setSnapIndicator, setPlaced, rotationStepRad,
+      view, snapTargets, setSnapIndicator, setPlaced, rotationStepRad,
     });
   }
   return handles;
 }
 
-function addLineHandles(handles, L, id, { view, updateLine, computeSnapTargets, setSnapIndicator }) {
+function addLineHandles(handles, L, id, { view, updateLine, snapTargets, setSnapIndicator }) {
   const mid = lerp(L.p1, L.p2, 0.5);
   const dir = sub(L.p2, L.p1);
   const len = Math.hypot(dir.x, dir.y);
@@ -1522,7 +1426,7 @@ function addLineHandles(handles, L, id, { view, updateLine, computeSnapTargets, 
     if (Math.abs(t_finger) < EPS) return;
     const projected = { x: axisOrigin.x + t_finger * axisDir.x, y: axisOrigin.y + t_finger * axisDir.y };
 
-    const targets = computeSnapTargets();
+    const targets = snapTargets;
     const snapRadiusWorld = SNAP_PX / view.scale;
     const perpTol = 2 / view.scale;
     let best = null;
@@ -1561,7 +1465,7 @@ function addLineHandles(handles, L, id, { view, updateLine, computeSnapTargets, 
     };
 
     const candidates = [0, Math.PI];
-    const targets = computeSnapTargets();
+    const targets = snapTargets;
     for (const t of targets.points) {
       if (dist(t, pivot) < EPS) continue;
       if (isOnEditLine(t)) continue;
@@ -1673,7 +1577,7 @@ function addCircleHandles(handles, C, id, { updateCircle }) {
 }
 
 function addPlacedTileHandles(handles, pt, tile, id, {
-  view, computeSnapTargets, setSnapIndicator, setPlaced, rotationStepRad,
+  view, snapTargets, setSnapIndicator, setPlaced, rotationStepRad,
 }) {
   // Move handle: tile center follows the finger, with vertex-snap onto any other
   // snap target (excluding this tile's own vertices).
@@ -1683,16 +1587,31 @@ function addPlacedTileHandles(handles, pt, tile, id, {
       const tentativePos = { x: free.x, y: free.y };
       const tentativePt = { ...pt, position: tentativePos };
       const tentativeWorldVerts = tile.vertices.map((v) => transformPoint(v, tentativePt));
-      const targets = computeSnapTargets();
+      const targets = snapTargets;
+      const { grid, gridSize } = targets;
       const radiusWorld = SNAP_PX / view.scale;
+      const radiusSq = radiusWorld * radiusWorld;
       let best = null;
-      for (let i = 0; i < tentativeWorldVerts.length; i++) {
-        const wv = tentativeWorldVerts[i];
-        for (const t of targets.points) {
-          if (t.kind === 'tile-vertex' && t.placedId === pt.id) continue;
-          const d = dist(wv, t);
-          if (d < radiusWorld && (!best || d < best.dist)) {
-            best = { vertexIdx: i, target: t, dist: d };
+
+      if (grid) {
+        for (let i = 0; i < tentativeWorldVerts.length; i++) {
+          const wv = tentativeWorldVerts[i];
+          const gx = Math.floor(wv.x / gridSize);
+          const gy = Math.floor(wv.y / gridSize);
+
+          for (let ix = gx - 1; ix <= gx + 1; ix++) {
+            for (let iy = gy - 1; iy <= gy + 1; iy++) {
+              const bucket = grid.get(`${ix},${iy}`);
+              if (!bucket) continue;
+              for (const t of bucket) {
+                if (t.kind === 'tile-vertex' && t.placedId === pt.id) continue;
+                const dx = wv.x - t.x, dy = wv.y - t.y;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < radiusSq && (!best || d2 < best.distSq)) {
+                  best = { vertexIdx: i, target: t, distSq: d2 };
+                }
+              }
+            }
           }
         }
       }
@@ -1738,73 +1657,3 @@ function addPlacedTileHandles(handles, pt, tile, id, {
   });
 }
 
-// ============================ SMALL RENDER COMPONENTS ============================
-
-// Render a stroked line / CCW arc / whole circle. Stroke widths are world-space
-// inputs that get divided by `scale` so they render at constant screen size.
-//
-// `shape` is one of:
-//   { type: 'line',        a, b }
-//   { type: 'arc',         center, radius, ang1, ang2 }
-//   { type: 'wholeCircle', center, radius }
-// `strokeWidth` is in screen pixels. `vector-effect: non-scaling-stroke` keeps
-// the stroke at that pixel width regardless of the surrounding SVG transform —
-// so we don't recompute width props on zoom, and React doesn't have to walk
-// every stroked element when the view scale changes.
-function StrokedShape({ shape, stroke, strokeWidth, opacity = 1, lineCap, pointerEvents }) {
-  const common = {
-    stroke,
-    strokeWidth,
-    fill: 'none',
-    opacity,
-    vectorEffect: 'non-scaling-stroke',
-  };
-  if (lineCap) common.strokeLinecap = lineCap;
-  if (pointerEvents !== undefined) common.pointerEvents = pointerEvents;
-
-  if (shape.type === 'line') {
-    return <line x1={shape.a.x} y1={shape.a.y} x2={shape.b.x} y2={shape.b.y} {...common} />;
-  }
-  if (shape.type === 'arc') {
-    return <path d={arcPathCCW(shape.center, shape.radius, shape.ang1, shape.ang2)} {...common} />;
-  }
-  if (shape.type === 'wholeCircle') {
-    return <circle cx={shape.center.x} cy={shape.center.y} r={shape.radius} {...common} />;
-  }
-  return null;
-}
-
-// `findSegmentAt` produces hits with `type: 'lineSeg'` / 'arc' (it doesn't normalise to the
-// StrokedShape vocabulary). These two helpers map a polygon-tap segment record into the
-// StrokedShape `shape` format. Polygon segs are never `wholeCircle` so we ignore that case.
-const polyDraftShape = (pd) => pd.seg.type === 'lineSeg'
-  ? { type: 'line', a: pd.from, b: pd.to }
-  : pd.seg; // already { type: 'arc', center, radius, ang1, ang2 }
-
-const polyRejectedShape = (seg) => seg.type === 'lineSeg'
-  ? { type: 'line', a: seg.a, b: seg.b }
-  : seg;
-
-function Handle({ h, scale }) {
-  // Handle geometry (radius, line endpoints, glyph offsets) is in world units
-  // and stays scale-dependent — no SVG attribute makes a circle's radius
-  // immune to the parent transform. Stroke widths and dasharrays use
-  // non-scaling-stroke so they don't churn React props on zoom.
-  return (
-    <g style={{ pointerEvents: 'none' }}>
-      {h.showTether && h.kind === 'rotate' && h.pivot && (
-        <line x1={h.pivot.x} y1={h.pivot.y} x2={h.x} y2={h.y}
-          stroke="#9C8A6A" strokeWidth={1} strokeDasharray="3 3"
-          vectorEffect="non-scaling-stroke" />
-      )}
-      <circle cx={h.x} cy={h.y} r={HANDLE_R / scale}
-        fill={COLOR.canvas} stroke="#3A2E1F" strokeWidth={1.5}
-        vectorEffect="non-scaling-stroke" />
-      {h.kind === 'rotate'   && <circle cx={h.x} cy={h.y} r={(HANDLE_R - 6) / scale} fill="#3A2E1F" />}
-      {h.kind === 'lengthen' && <line x1={h.x - 5 / scale} y1={h.y} x2={h.x + 5 / scale} y2={h.y} stroke="#3A2E1F" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
-      {h.kind === 'lengthen' && <line x1={h.x} y1={h.y - 5 / scale} x2={h.x} y2={h.y + 5 / scale} stroke="#3A2E1F" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
-      {h.kind === 'radius'   && <circle cx={h.x} cy={h.y} r={(HANDLE_R - 8) / scale} fill="#3A2E1F" />}
-      {h.kind === 'center'   && <text x={h.x} y={h.y + 4 / scale} textAnchor="middle" fontSize={12 / scale} fill="#3A2E1F">+</text>}
-    </g>
-  );
-}
