@@ -13,6 +13,7 @@ import { computeIntersections, getLineSegments, getCircleArcs, pidForPoint } fro
 import { arcPathCCW } from '../geometry/arc.js';
 import { clipLineByPolygon, clipArcByPolygon, clipWholeCircleByPolygon } from '../geometry/clip.js';
 import { intersectShapes } from '../geometry/shapeIntersect.js';
+import { shapesEqual } from '../geometry/shapeEqual.js';
 import { newId } from '../geometry/id.js';
 
 import { tilePathD } from '../tiles/tilePath.js';
@@ -108,9 +109,14 @@ export default function ZellijApp() {
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
-      // Inks already include the boundary (post-v2), so iterating inks +
-      // construction covers every visible stroke without double-counting edges.
+      // Each visible stroke as a world-space shape: boundary edges (whether
+      // currently inked or not), plus interior inks, plus faint construction.
+      // Listing edges *and* inks may double-count boundary intersections when
+      // an edge is inked (its matching shape lives in inks too) — but
+      // intersectShapes returns nothing for coincident shapes, so the practical
+      // result is just a few wasted comparisons, not spurious snap points.
       const tileShapes = [
+        ...(tile.edges || []).map((e) => edgeToShape(e, tile.vertices)).filter(Boolean),
         ...(tile.inks || []),
         ...(tile.construction || []),
       ].map((s) => transformShape(s, pt));
@@ -405,10 +411,12 @@ export default function ZellijApp() {
     // shape as canvas sub-segments; lineId/circleId are absent (these don't
     // belong to any canvas line/circle), but pidA/pidB are position-based so
     // they connect to canvas pids automatically wherever world points coincide.
+    // (placedId, edgeIdx) lets the ink tool find the inventory tile to mutate.
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
-      for (const e of tile.edges) {
+      for (let i = 0; i < tile.edges.length; i++) {
+        const e = tile.edges[i];
         if (e.type === 'line') {
           const a = transformPoint(tile.vertices[e.from], pt);
           const b = transformPoint(tile.vertices[e.to],   pt);
@@ -418,10 +426,10 @@ export default function ZellijApp() {
               type: 'lineSeg', a, b,
               dist: p.dist,
               pidA: pidForPoint(a), pidB: pidForPoint(b),
+              placedId: pt.id, edgeIdx: i,
             };
           }
         } else if (e.type === 'arc') {
-          // Convert to a stroked-shape arc (CCW ang1 → ang2) in world coords.
           const arc = transformShape(edgeToShape(e, tile.vertices), pt);
           const p = projOnCircle(w, arc.center, arc.radius);
           if (p.dist < tolWorld && isAngleBetween(p.angle, arc.ang1, arc.ang2)) {
@@ -435,6 +443,7 @@ export default function ZellijApp() {
                 a, b,
                 dist: p.dist,
                 pidA: pidForPoint(a), pidB: pidForPoint(b),
+                placedId: pt.id, edgeIdx: i,
               };
             }
           }
@@ -448,10 +457,14 @@ export default function ZellijApp() {
   const handleInkTap = (w) => {
     const seg = findSegmentAt(w);
     if (!seg) return;
-    // Tile edges have no canvas line/circle id — they're already inks of the
-    // parent tile (set at finalize time). Inking-on-canvas doesn't apply to them.
-    if (seg.type === 'lineSeg' && !seg.lineId) return;
-    if (seg.type === 'arc' && !seg.circleId) return;
+    // Tile-edge taps toggle the boundary ink on the underlying inventory tile.
+    // Tile is shared across all its placements, so toggling here updates every
+    // placement of that tile in lockstep — same idea as a Symbol in a vector
+    // editor.
+    if (seg.placedId !== undefined) {
+      toggleTileEdgeInk(seg);
+      return;
+    }
     pushUndo();
     if (seg.type === 'lineSeg') {
       const idx = inks.findIndex(
@@ -472,6 +485,31 @@ export default function ZellijApp() {
       if (idx >= 0) setInks((I) => I.filter((_, i) => i !== idx));
       else setInks((I) => [...I, { type: 'wholeCircle', circleId: seg.circleId }]);
     }
+  };
+
+  // Toggle the bold/non-bold state of an edge on a placed tile. The state
+  // lives implicitly: an edge is "inked" iff a matching shape is in
+  // tile.inks. Tap with ink → if matching ink exists, remove (un-ink);
+  // otherwise add (re-ink). Mutates the inventory tile, so every placement
+  // of that tile updates together.
+  const toggleTileEdgeInk = (seg) => {
+    const pt = placed.find((p) => p.id === seg.placedId);
+    if (!pt) return;
+    const tile = tiles.find((t) => t.id === pt.tileId);
+    if (!tile) return;
+    const edge = tile.edges[seg.edgeIdx];
+    if (!edge) return;
+    const edgeShape = edgeToShape(edge, tile.vertices);
+    if (!edgeShape) return;
+    pushUndo();
+    setTiles((T) => T.map((t) => {
+      if (t.id !== tile.id) return t;
+      const matchIdx = (t.inks || []).findIndex((ink) => shapesEqual(edgeShape, ink));
+      if (matchIdx >= 0) {
+        return { ...t, inks: t.inks.filter((_, i) => i !== matchIdx) };
+      }
+      return { ...t, inks: [...(t.inks || []), edgeShape] };
+    }));
   };
 
   // ============================ POLYGON TOOL ============================
@@ -546,6 +584,37 @@ export default function ZellijApp() {
   //           polygon boundary so they don't bleed past the new tile's outline.
   // Placed tiles whose centroid lies inside the polygon are baked into the new tile
   // and removed from the canvas (snapshot semantics, no nested data structure).
+  // True if the cycle entry's source segment is currently inked. For canvas
+  // segs we look it up in the canvas inks list by lineId/circleId + parameters;
+  // for tile-edge segs we check the constituent inventory tile's inks for a
+  // shape match against the edge.
+  const isCycleSegInked = (c) => {
+    const s = c.seg;
+    if (s.placedId !== undefined) {
+      const pt = placed.find((p) => p.id === s.placedId);
+      const tile = pt && tiles.find((t) => t.id === pt.tileId);
+      const e = tile?.edges?.[s.edgeIdx];
+      if (!e) return false;
+      const shape = edgeToShape(e, tile.vertices);
+      return !!shape && (tile.inks || []).some((ink) => shapesEqual(shape, ink));
+    }
+    if (s.type === 'lineSeg' && s.lineId) {
+      return inks.some(
+        (k) => k.type === 'lineSeg' && k.lineId === s.lineId
+            && Math.abs(k.t1 - s.t1) < EPS * 10
+            && Math.abs(k.t2 - s.t2) < EPS * 10,
+      );
+    }
+    if (s.type === 'arc' && s.circleId) {
+      return inks.some(
+        (k) => k.type === 'arc' && k.circleId === s.circleId
+            && Math.abs(k.ang1 - s.ang1) < EPS * 10
+            && Math.abs(k.ang2 - s.ang2) < EPS * 10,
+      );
+    }
+    return false;
+  };
+
   const finalizePolygon = (cycle) => {
     pushUndo();
 
@@ -579,8 +648,15 @@ export default function ZellijApp() {
       return { type: 'arc', center: c.seg.center, radius: c.seg.radius, ang1: c.seg.ang1, ang2: c.seg.ang2 };
     });
 
-    // ---- 2. Boundary inks (one per polygon edge) ----
-    const boundaryInks = polyEdgesWorld.map(toLocal);
+    // ---- 2. Boundary inks: only edges whose source segment was inked ----
+    // The user controls boldness by inking before tracing. Inked construction
+    // → bold tile boundary at that edge. Un-inked source → faint tile outline
+    // (rendered via the un-inked-edge pass at draw time, no ink record needed).
+    const boundaryInks = [];
+    for (let i = 0; i < cycle.length; i++) {
+      if (!isCycleSegInked(cycle[i])) continue;
+      boundaryInks.push(toLocal(polyEdgesWorld[i]));
+    }
 
     // ---- 3. Canvas inks inside the polygon, clipped at boundary ----
     const inksInside = [];
@@ -669,10 +745,18 @@ export default function ZellijApp() {
       // placed tile only partially overlaps it, so clip them too.
       for (const ink of tile.inks) captureClipped(transformShape(ink, pt), flattenedInks);
       for (const c   of tile.construction) captureClipped(transformShape(c, pt), flattenedCons);
-      // Boundary edges of the constituent tile become inks at the meta level.
+      // Boundary edges of the constituent tile carry into the parent at the
+      // same boldness: inked → parent's inks (bold), un-inked → parent's
+      // construction (faint). An inked edge already has a matching shape in
+      // tile.inks (which we're capturing into flattenedInks above), so adding
+      // it again here would double-draw — skip it. Un-inked edges get added
+      // as construction so the silhouette is preserved.
       for (const e of tile.edges) {
         const localShape = edgeToShape(e, tile.vertices);
-        if (localShape) captureClipped(transformShape(localShape, pt), flattenedInks);
+        if (!localShape) continue;
+        const isInked = (tile.inks || []).some((ink) => shapesEqual(localShape, ink));
+        if (isInked) continue; // already captured via tile.inks above
+        captureClipped(transformShape(localShape, pt), flattenedCons);
       }
     }
 
@@ -998,14 +1082,23 @@ export default function ZellijApp() {
               const tile = tiles.find((t) => t.id === pt.tileId);
               if (!tile) return null;
               const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
+              // An edge is "inked" iff a matching shape is in tile.inks (added at
+              // finalize / by the ink tool). Inked edges render bold via the inks
+              // pass below; un-inked edges render faintly here so the tile shape
+              // is still legible. Always rendered regardless of showCons, since
+              // they're the tile's outline, not scaffolding.
+              const uninkedEdgeShapes = tile.edges
+                .map((e) => edgeToShape(e, tile.vertices))
+                .filter((s) => s && !tile.inks.some((ink) => shapesEqual(s, ink)));
               return (
                 <g key={pt.id} transform={transform}>
-                  {/* Tile silhouette — fill only. The visible outline is provided by the
-                      boundary inks captured at finalize time, so it renders at the same
-                      stroke weight/colour as any other ink. */}
                   <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="none" />
                   {showCons && tile.construction && tile.construction.map((c, i) => (
                     <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
+                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
+                  ))}
+                  {uninkedEdgeShapes.map((s, i) => (
+                    <StrokedShape key={`ue-${i}`} shape={s} scale={view.scale}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
                   ))}
                   {tile.inks.map((ink, i) => (
