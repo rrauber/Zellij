@@ -3,6 +3,7 @@ import { tilePathD } from '../tiles/tilePath.js';
 import { arcPathCCW } from '../geometry/arc.js';
 import { edgeToShape } from '../tiles/transform.js';
 import { shapesEqual } from '../geometry/shapeEqual.js';
+import { COLOR } from '../theme.js';
 
 // Thumbnail of a tile in the inventory drawer. Tap the thumbnail to place it
 // onto the canvas; tap "delete" to remove the tile (and any placements of it).
@@ -56,16 +57,26 @@ export default function TilePreview({ tile, onUse, onDelete }) {
     <div className="flex flex-col items-center" style={{ minWidth: '110px' }}>
       <div
         onClick={onUse}
-        className="cursor-pointer rounded"
-        style={{ background: '#F1E9D6', border: '1px solid #3A2E1F', padding: '4px' }}
+        className="cursor-pointer"
+        style={{
+          background: COLOR.canvas,
+          border: `1px solid ${COLOR.border}`,
+          borderRadius: 8,
+          padding: 4,
+          boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+        }}
       >
         <svg width={size} height={size} viewBox={`${minX - pad} ${minY - pad} ${w} ${h}`}>
           <path d={tilePathD(tile)} fill="rgba(225,200,150,0.4)" stroke="none" />
-          {uninkedEdgeShapes.map((s, i) => renderShape(s, `ue-${i}`, '#9C8A6A', strokeFaint, 0.5))}
-          {tile.inks.map((ink, i) => renderShape(ink, i, '#1B1B1B', strokeInk))}
+          {uninkedEdgeShapes.map((s, i) => renderShape(s, `ue-${i}`, COLOR.construction, strokeFaint, 0.5))}
+          {tile.inks.map((ink, i) => renderShape(ink, i, COLOR.ink, strokeInk))}
         </svg>
       </div>
-      <button onClick={onDelete} className="text-xs mt-1" style={{ color: '#8B2E1A' }}>
+      <button
+        onClick={onDelete}
+        className="text-xs mt-1"
+        style={{ color: COLOR.danger, background: 'transparent', border: 'none', cursor: 'pointer' }}
+      >
         delete
       </button>
     </div>

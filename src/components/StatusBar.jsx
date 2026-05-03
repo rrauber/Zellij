@@ -1,9 +1,18 @@
 import React from 'react';
 import { COLOR_PALETTE } from '../constants.js';
+import { COLOR } from '../theme.js';
 
-// The skinny strip below the toolbar. Shows draft hints, polygon progress,
-// editing controls (rotation step, flip, delete), and — in fill mode — the
-// colour palette.
+// Always-visible thin strip below the toolbar. Two jobs:
+//   1. Surface a one-line hint about what the current tool does, so the user
+//      doesn't have to guess what each toolbar icon means (especially on
+//      mobile where tooltips don't exist).
+//   2. House transient context: in-progress draft prompts, polygon progress,
+//      and the controls for whatever object is currently being edited.
+//      The colour palette also lives here when the Fill tool is active.
+//
+// One bar instead of separate "tool hint" and "editing controls" surfaces —
+// keeps the chrome budget tight on narrow viewports.
+
 export default function StatusBar({
   draft, polyDraft, editing,
   onClearEditing,
@@ -13,15 +22,22 @@ export default function StatusBar({
   onRotatePlaced, onSnapPlacedToGrid, onResetPlaced, onFlipPlaced,
   tool, selectedColor, onSelectColor,
 }) {
-  const fillActive = tool === 'fill';
-  const visible = draft || polyDraft.length > 0 || editing || fillActive;
-  if (!visible) return null;
+  const hint = computeHint({ tool, draft, polyDraft, editing });
 
   return (
-    <div className="px-3 py-1 text-xs" style={{ background: '#D9C9A4', color: '#3A2E1F', fontStyle: 'italic' }}>
-      {fillActive && (
-        <div className="flex items-center gap-1.5">
-          <span style={{ marginRight: 4 }}>Tap a region to fill</span>
+    <div
+      className="px-3 py-1.5 text-xs flex items-center gap-2"
+      style={{
+        background: COLOR.surfaceAlt,
+        color: COLOR.textMuted,
+        borderBottom: `1px solid ${COLOR.border}`,
+        minHeight: 32,
+      }}
+    >
+      <span style={{ flex: '0 1 auto' }}>{hint}</span>
+
+      {tool === 'fill' && (
+        <div className="flex items-center gap-1.5" style={{ marginLeft: 8 }}>
           {COLOR_PALETTE.map((c) => {
             const isSelected = c === selectedColor;
             const isEraser = c === null;
@@ -31,21 +47,22 @@ export default function StatusBar({
                 onClick={() => onSelectColor(c)}
                 title={isEraser ? 'Eraser' : c}
                 style={{
-                  width: 22, height: 22,
-                  borderRadius: 11,
+                  width: 20, height: 20,
+                  borderRadius: 10,
                   background: isEraser ? 'transparent' : c,
-                  border: isSelected ? '2.5px solid #3A2E1F' : '1px solid #3A2E1F',
-                  boxShadow: isSelected ? '0 0 0 1.5px #F1E9D6 inset' : 'none',
+                  border: `1px solid ${isSelected ? COLOR.text : COLOR.borderStrong}`,
+                  boxShadow: isSelected ? `0 0 0 2px ${COLOR.surface}, 0 0 0 3px ${COLOR.text}` : 'none',
                   cursor: 'pointer',
                   position: 'relative',
                   flexShrink: 0,
+                  padding: 0,
                 }}
               >
                 {isEraser && (
                   <span style={{
                     position: 'absolute', inset: 0,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 12, color: '#8B2E1A',
+                    fontSize: 11, color: COLOR.textMuted,
                   }}>✕</span>
                 )}
               </button>
@@ -53,40 +70,73 @@ export default function StatusBar({
           })}
         </div>
       )}
-      {draft?.kind === 'line' && 'Tap to set second endpoint'}
-      {draft?.kind === 'circle' && draft.step === 'measureA' && 'Tap second point to set compass width'}
-      {draft?.kind === 'circle' && draft.step === 'placing' && 'Tap any point to place a circle. Tap Circle tool to remeasure.'}
-      {polyDraft.length > 0 && `Polygon: ${polyDraft.length} edge${polyDraft.length === 1 ? '' : 's'} selected. Tap connecting segment, or close back to start.`}
+
       {editing && !draft && (
-        <div className="flex gap-2 items-center">
-          <span>Editing {editing.kind}</span>
-          {editing.kind === 'line' && (
-            <button onClick={() => onDeleteLine(editing.id)} className="ml-auto px-2 py-0.5" style={{ color: '#8B2E1A' }}>delete</button>
-          )}
-          {editing.kind === 'circle' && (
-            <button onClick={() => onDeleteCircle(editing.id)} className="ml-auto px-2 py-0.5" style={{ color: '#8B2E1A' }}>delete</button>
-          )}
+        <div className="flex gap-1.5 items-center" style={{ marginLeft: 'auto' }}>
           {editing.kind === 'placedTile' && (
             <>
-              <button
-                onClick={onCycleRotationStep}
-                title="Tap to cycle rotation step"
-                className="px-2 py-0.5"
-                style={{ border: '1px solid #3A2E1F', background: '#E5DAC0', minWidth: 44 }}
-              >
+              <SmallBtn onClick={onCycleRotationStep} title="Cycle rotation step">
                 {rotationStepDeg}°
-              </button>
-              <button onClick={() => onRotatePlaced(editing.id, -rotationStepRad)} title="Rotate counter-clockwise by step" className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>↺</button>
-              <button onClick={() => onRotatePlaced(editing.id, rotationStepRad)}  title="Rotate clockwise by step"        className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>↻</button>
-              <button onClick={() => onSnapPlacedToGrid(editing.id)}              title="Snap rotation to step grid"     className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>⊞</button>
-              <button onClick={() => onResetPlaced(editing.id)}                   title="Reset to original orientation"  className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>⟲</button>
-              <button onClick={() => onFlipPlaced(editing.id)}                                                            className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>flip</button>
-              <button onClick={() => onDeletePlaced(editing.id)}                                                          className="px-2 py-0.5" style={{ color: '#8B2E1A' }}>delete</button>
+              </SmallBtn>
+              <SmallBtn onClick={() => onRotatePlaced(editing.id, -rotationStepRad)} title="Rotate counter-clockwise">↺</SmallBtn>
+              <SmallBtn onClick={() => onRotatePlaced(editing.id, rotationStepRad)}  title="Rotate clockwise">↻</SmallBtn>
+              <SmallBtn onClick={() => onSnapPlacedToGrid(editing.id)}              title="Snap rotation to grid">⊞</SmallBtn>
+              <SmallBtn onClick={() => onResetPlaced(editing.id)}                   title="Reset orientation">⟲</SmallBtn>
+              <SmallBtn onClick={() => onFlipPlaced(editing.id)}                    title="Flip">⇄</SmallBtn>
+              <SmallBtn onClick={() => onDeletePlaced(editing.id)}                  title="Delete (⌫)" danger>delete</SmallBtn>
             </>
           )}
-          <button onClick={onClearEditing} className="px-2 py-0.5" style={{ border: '1px solid #3A2E1F' }}>done</button>
+          {editing.kind === 'line'   && <SmallBtn onClick={() => onDeleteLine(editing.id)}   title="Delete (⌫)" danger>delete</SmallBtn>}
+          {editing.kind === 'circle' && <SmallBtn onClick={() => onDeleteCircle(editing.id)} title="Delete (⌫)" danger>delete</SmallBtn>}
+          <SmallBtn onClick={onClearEditing} title="Done (Esc)">done</SmallBtn>
         </div>
       )}
     </div>
+  );
+}
+
+// One-line description of the current tool / draft / polygon-progress state.
+// Falling-through cases are arranged from most specific (mid-draft prompt) to
+// most general (idle tool).
+function computeHint({ tool, draft, polyDraft, editing }) {
+  if (draft?.kind === 'line') return 'Tap to set the second endpoint.';
+  if (draft?.kind === 'circle' && draft.step === 'measureA') return 'Tap a second point to set the compass width.';
+  if (draft?.kind === 'circle' && draft.step === 'placing') return 'Tap to place a circle. Tap the Circle tool to remeasure.';
+  if (polyDraft?.length > 0) {
+    return `Polygon: ${polyDraft.length} edge${polyDraft.length === 1 ? '' : 's'} — tap a connecting segment, or close back to the start.`;
+  }
+  if (editing) {
+    if (editing.kind === 'line')       return 'Editing line — drag the handles to lengthen or rotate.';
+    if (editing.kind === 'circle')     return 'Editing circle — drag the centre or radius handle.';
+    if (editing.kind === 'placedTile') return 'Editing tile — drag to move, use the controls to rotate/flip.';
+  }
+  switch (tool) {
+    case 'line':    return 'Line: tap two points to draw a line.';
+    case 'circle':  return 'Circle: tap two points to set the compass, then tap to place.';
+    case 'ink':     return 'Ink: tap a construction segment to bold it. Tap a tile edge to toggle its boldness.';
+    case 'polygon': return 'Polygon: tap segments around a closed loop to capture as a tile.';
+    case 'fill':    return 'Fill: tap inside a region to apply the selected colour.';
+    case 'select':  return 'Select: tap a line, circle, or tile to edit it.';
+    default:        return '';
+  }
+}
+
+function SmallBtn({ children, onClick, title, danger }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        height: 24,
+        padding: '0 8px',
+        borderRadius: 4,
+        border: `1px solid ${COLOR.border}`,
+        background: COLOR.surface,
+        color: danger ? COLOR.danger : COLOR.text,
+        fontSize: 11,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+      }}
+    >{children}</button>
   );
 }

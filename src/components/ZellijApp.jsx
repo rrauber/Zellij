@@ -21,6 +21,8 @@ import { newId } from '../geometry/id.js';
 import { tilePathD } from '../tiles/tilePath.js';
 import { transformPoint, transformShape, translateShape, edgeToShape } from '../tiles/transform.js';
 
+import { COLOR, FONT_STACK } from '../theme.js';
+
 import { useDocument } from '../hooks/useDocument.js';
 import { useContainerSize } from '../hooks/useContainerSize.js';
 
@@ -1061,8 +1063,9 @@ export default function ZellijApp() {
     <div
       className="w-full h-screen flex flex-col"
       style={{
-        background: '#F1E9D6',
-        fontFamily: '"Cormorant Garamond", "EB Garamond", Georgia, serif',
+        background: COLOR.canvas,
+        fontFamily: FONT_STACK,
+        color: COLOR.text,
         userSelect: 'none', touchAction: 'none',
       }}
     >
