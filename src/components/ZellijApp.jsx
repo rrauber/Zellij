@@ -1183,43 +1183,17 @@ export default function ZellijApp() {
           onPointerCancel={onPointerUp}
         >
           <g transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}>
-            {/* Coloured face fills — rendered first so construction lines, ink
-                strokes, and tile silhouettes all draw on top. Stable across
-                ink edits because colours are anchored to a world point, not to
-                a face identifier. */}
-            {coloredFaces.map((cf, i) => (
-              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
-            ))}
-
-            {/* Construction circles */}
-            {showCons && Object.entries(circles).map(([id, c]) => (
-              <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
-                fill="none" stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
-            ))}
-            {/* Construction lines */}
-            {showCons && Object.entries(lines).map(([id, l]) => (
-              <line key={`l-${id}`} x1={l.p1.x} y1={l.p1.y} x2={l.p2.x} y2={l.p2.y}
-                stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
-            ))}
-
-            {/* Inks */}
-            {inkPaths.map((p, i) => (
-              <StrokedShape key={`ink-${i}`} shape={p} scale={view.scale}
-                stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
-            ))}
-
-            {/* Placed tiles */}
+            {/* ---- Background pass for placed tiles ----
+                Silhouette tint, interior construction (gated by showCons), and
+                un-inked tile edges (shared seams already suppressed via
+                sharedEdgeKeys). All faint things go here so the colour-fill
+                pass below draws cleanly on top — without this layering, two
+                adjacent tile silhouettes leave an antialias seam visible
+                through whatever colour is painted across them. */}
             {placed.map((pt) => {
               const tile = tiles.find((t) => t.id === pt.tileId);
               if (!tile) return null;
               const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
-              // An edge is "inked" iff a matching shape is in tile.inks (added at
-              // finalize / by the ink tool). Inked edges render bold via the inks
-              // pass below; un-inked edges render faintly here so the tile shape
-              // is still legible. Always rendered regardless of showCons, since
-              // they're the tile's outline, not scaffolding. Edges that coincide
-              // with another placed tile's un-inked edge (a shared seam between
-              // adjacent tiles) are dropped — see sharedEdgeKeys.
               const uninkedEdgeShapes = tile.edges
                 .map((e, idx) => {
                   const s = edgeToShape(e, tile.vertices);
@@ -1230,7 +1204,7 @@ export default function ZellijApp() {
                 })
                 .filter(Boolean);
               return (
-                <g key={pt.id} transform={transform}>
+                <g key={`bg-${pt.id}`} transform={transform}>
                   <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="none" />
                   {showCons && tile.construction && tile.construction.map((c, i) => (
                     <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
@@ -1240,6 +1214,46 @@ export default function ZellijApp() {
                     <StrokedShape key={`ue-${i}`} shape={s} scale={view.scale}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
                   ))}
+                </g>
+              );
+            })}
+
+            {/* Canvas construction (faint, global). On top of tile silhouettes
+                so a construction line is visible across tiles, but still
+                under colours. */}
+            {showCons && Object.entries(circles).map(([id, c]) => (
+              <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
+                fill="none" stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
+            ))}
+            {showCons && Object.entries(lines).map(([id, l]) => (
+              <line key={`l-${id}`} x1={l.p1.x} y1={l.p1.y} x2={l.p2.x} y2={l.p2.y}
+                stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
+            ))}
+
+            {/* Coloured face fills. Render after every faint background layer
+                so any silhouette seam or stray un-inked edge is cleanly
+                covered, but before the inks below so bold strokes still
+                outline coloured regions. */}
+            {coloredFaces.map((cf, i) => (
+              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
+            ))}
+
+            {/* Canvas inks */}
+            {inkPaths.map((p, i) => (
+              <StrokedShape key={`ink-${i}`} shape={p} scale={view.scale}
+                stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
+            ))}
+
+            {/* ---- Foreground pass for placed tiles ----
+                Bold inked strokes plus the orange selection indicator. These
+                draw on top of colour fills so a coloured region is always
+                outlined by its inks. */}
+            {placed.map((pt) => {
+              const tile = tiles.find((t) => t.id === pt.tileId);
+              if (!tile) return null;
+              const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
+              return (
+                <g key={`fg-${pt.id}`} transform={transform}>
                   {tile.inks.map((ink, i) => (
                     <StrokedShape key={i} shape={ink} scale={view.scale}
                       stroke="#1B1B1B" strokeWidth={2} lineCap="round" />

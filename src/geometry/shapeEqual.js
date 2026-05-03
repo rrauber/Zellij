@@ -10,8 +10,14 @@
 
 import { dist } from './vec.js';
 
-const POS_TOL = 1e-3;
-const ANG_TOL = 1e-5;
+// Position tolerance is a touch generous (matches the pidForPoint bucket size)
+// because adjacent placed tiles' shared edges, once transformed through their
+// per-placement flip/rotate/translate, can drift by a small amount that's
+// still semantically the same edge. False positives at this scale would
+// require two unrelated edges to coincide within 0.01 world units in both
+// endpoints — extremely unlikely for hand-drawn zellij geometry.
+const POS_TOL = 0.01;
+const ANG_TOL = 1e-4;
 
 export function shapesEqual(a, b) {
   if (!a || !b || a.type !== b.type) return false;
