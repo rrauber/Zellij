@@ -81,6 +81,16 @@ export default function ZellijApp() {
   const ptrState = useRef({ pointers: new Map(), action: null });
   const [containerRef, containerSize] = useContainerSize();
 
+  // True while a handle drag is in flight. Heavy memos (planar faces, tile
+  // intersection snap points) short-circuit to a cached previous result while
+  // this is set, since recomputing them on every drag frame is what's
+  // pinning the CPU on complex designs. The drag itself still moves the
+  // light visuals — silhouette wash, un-inked edges, inks — by re-running
+  // their cheap memos.
+  const [isDragging, setIsDragging] = useState(false);
+  const cachedFacesRef = useRef([]);
+  const cachedTileIntersRef = useRef([]);
+
   const { lineHits, circleHits, intersections } = useMemo(
     () => computeIntersections(lines, circles),
     [lines, circles],
@@ -186,14 +196,18 @@ export default function ZellijApp() {
 
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
   // pick the smallest containing face (most specific region). The graph build
-  // is O(N²) in ink count for the intersection step but N is small for hand-
-  // drawn zellij designs and the memo only re-runs when inks change.
+  // is O(N²) in ink count for the intersection step — fast enough at rest,
+  // but bottlenecks the frame budget if it runs on every drag tick. While a
+  // handle is being dragged, return the cached previous value; recompute
+  // once when the drag ends.
   const planarFaces = useMemo(() => {
+    if (isDragging) return cachedFacesRef.current;
     const { faces, vertices } = buildFaces(globalInkShapes);
     const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
     withArea.sort((a, b) => a.area - b.area);
+    cachedFacesRef.current = withArea;
     return withArea;
-  }, [globalInkShapes]);
+  }, [globalInkShapes, isDragging]);
 
   // For each persisted colour point, find the smallest face containing it and
   // emit { d, color } for rendering. Stable across edits because colours are
@@ -212,8 +226,12 @@ export default function ZellijApp() {
   // ============================ SNAPPING ============================
   // Tile-internal intersections (and crossings of tile content with canvas
   // construction). Memoised because computeSnapTargets is hot — called on every
-  // pointer move during a drag — and this loop is O(tile-shapes²).
+  // pointer move during a drag — and this loop is O(tile-shapes²). Same
+  // drag-cache trick as planarFaces: while a drag is in flight the snap
+  // points the user could possibly want are the *other* tiles' (which haven't
+  // moved), so the cached pre-drag set is semantically correct anyway.
   const tileIntersectionPoints = useMemo(() => {
+    if (isDragging) return cachedTileIntersRef.current;
     if (placed.length === 0) return [];
     const out = [];
     const canvasShapes = [
@@ -251,8 +269,9 @@ export default function ZellijApp() {
         }
       }
     }
+    cachedTileIntersRef.current = out;
     return out;
-  }, [placed, tiles, lines, circles]);
+  }, [placed, tiles, lines, circles, isDragging]);
 
   // Returns: { points: [{x,y, kind}], lines1D: [...], circles1D: [...] }
   const computeSnapTargets = useCallback(() => {
@@ -382,6 +401,7 @@ export default function ZellijApp() {
       ptrState.current.action.handle.onEnd?.();
       ptrState.current.action = null;
       setSnapIndicator(null);
+      setIsDragging(false); // unfreezes the heavy memos for one final recompute
       return;
     }
     if (ptrState.current.action?.kind === 'placeTile') {
@@ -1175,6 +1195,7 @@ export default function ZellijApp() {
                   ...pos, downAt: Date.now(), moved: false, startScreen: pos, startWorld: worldP,
                 });
                 ptrState.current.action = { kind: 'dragHandle', handle: nearest, startView: { ...view } };
+                setIsDragging(true);
                 return;
               }
             }
@@ -1222,7 +1243,7 @@ export default function ZellijApp() {
               return (
                 <g key={`bg-${pt.id}`} transform={transform}>
                   {uninkedEdgeShapes.map((s, i) => (
-                    <StrokedShape key={`ue-${i}`} shape={s} scale={view.scale}
+                    <StrokedShape key={`ue-${i}`} shape={s}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
                   ))}
                 </g>
@@ -1231,8 +1252,12 @@ export default function ZellijApp() {
 
             {/* Coloured face fills — bold version. The silhouette pass below
                 adds a translucent tan wash over them so they read as a
-                subtle, slightly muted colour rather than vivid blocks. */}
-            {coloredFaces.map((cf, i) => (
+                subtle, slightly muted colour rather than vivid blocks.
+                Hidden during a handle drag because the underlying face graph
+                is frozen for performance — letting them render at stale
+                positions while their tiles move would look like floating
+                debris. They snap back into place on release. */}
+            {!isDragging && coloredFaces.map((cf, i) => (
               <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
             ))}
 
@@ -1249,11 +1274,11 @@ export default function ZellijApp() {
                 construction is visible over coloured regions for reference. */}
             {showCons && Object.entries(circles).map(([id, c]) => (
               <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
-                fill="none" stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
+                fill="none" stroke="#9C8A6A" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.4} />
             ))}
             {showCons && Object.entries(lines).map(([id, l]) => (
               <line key={`l-${id}`} x1={l.p1.x} y1={l.p1.y} x2={l.p2.x} y2={l.p2.y}
-                stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
+                stroke="#9C8A6A" strokeWidth={1} vectorEffect="non-scaling-stroke" opacity={0.4} />
             ))}
 
             {/* Per-tile interior construction (also visible over colours). */}
@@ -1264,7 +1289,7 @@ export default function ZellijApp() {
               return (
                 <g key={`mid-${pt.id}`} transform={transform}>
                   {tile.construction.map((c, i) => (
-                    <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
+                    <StrokedShape key={`tc-${i}`} shape={c}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
                   ))}
                 </g>
@@ -1273,7 +1298,7 @@ export default function ZellijApp() {
 
             {/* Canvas inks */}
             {inkPaths.map((p, i) => (
-              <StrokedShape key={`ink-${i}`} shape={p} scale={view.scale}
+              <StrokedShape key={`ink-${i}`} shape={p}
                 stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
             ))}
 
@@ -1288,13 +1313,13 @@ export default function ZellijApp() {
               return (
                 <g key={`fg-${pt.id}`} transform={transform}>
                   {tile.inks.map((ink, i) => (
-                    <StrokedShape key={i} shape={ink} scale={view.scale}
+                    <StrokedShape key={i} shape={ink}
                       stroke="#1B1B1B" strokeWidth={2} lineCap="round" />
                   ))}
                   {editing?.kind === 'placedTile' && editing.id === pt.id && (
                     <path d={tilePathD(tile)} fill="none" stroke="#C58A3A"
-                      strokeWidth={2.5 / view.scale}
-                      strokeDasharray={`${4 / view.scale} ${3 / view.scale}`} />
+                      strokeWidth={2.5} strokeDasharray="4 3"
+                      vectorEffect="non-scaling-stroke" />
                   )}
                 </g>
               );
@@ -1302,7 +1327,7 @@ export default function ZellijApp() {
 
             {/* Polygon-in-progress preview */}
             {polyDraft.map((pd, i) => (
-              <StrokedShape key={`pd-${i}`} shape={polyDraftShape(pd)} scale={view.scale}
+              <StrokedShape key={`pd-${i}`} shape={polyDraftShape(pd)}
                 stroke="#C58A3A" strokeWidth={3} lineCap="round" opacity={0.85} />
             ))}
 
@@ -1315,11 +1340,12 @@ export default function ZellijApp() {
               return (
                 <g pointerEvents="none">
                   <circle cx={start.x} cy={start.y} r={11 / view.scale}
-                    fill="none" stroke="#C58A3A" strokeWidth={2 / view.scale}
-                    strokeDasharray={`${3 / view.scale} ${2 / view.scale}`} />
+                    fill="none" stroke="#C58A3A" strokeWidth={2}
+                    strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />
                   {!sameAsStart && (
                     <circle cx={next.x} cy={next.y} r={9 / view.scale}
-                      fill="#C58A3A" stroke="#3A2E1F" strokeWidth={1.5 / view.scale} />
+                      fill="#C58A3A" stroke="#3A2E1F" strokeWidth={1.5}
+                      vectorEffect="non-scaling-stroke" />
                   )}
                 </g>
               );
@@ -1327,7 +1353,7 @@ export default function ZellijApp() {
 
             {/* Rejected polygon-tap feedback. */}
             {polyRejected && (
-              <StrokedShape shape={polyRejectedShape(polyRejected)} scale={view.scale}
+              <StrokedShape shape={polyRejectedShape(polyRejected)}
                 stroke="#8B2E1A" strokeWidth={3.5} lineCap="round" opacity={0.7}
                 pointerEvents="none" />
             )}
@@ -1343,8 +1369,8 @@ export default function ZellijApp() {
               <>
                 <circle cx={draft.refB.x} cy={draft.refB.y} r={5 / view.scale} fill="#C58A3A" />
                 <line x1={draft.refA.x} y1={draft.refA.y} x2={draft.refB.x} y2={draft.refB.y}
-                  stroke="#C58A3A" strokeWidth={1.5 / view.scale}
-                  strokeDasharray={`${4 / view.scale} ${3 / view.scale}`} opacity={0.7} />
+                  stroke="#C58A3A" strokeWidth={1.5} strokeDasharray="4 3"
+                  vectorEffect="non-scaling-stroke" opacity={0.7} />
               </>
             )}
 
@@ -1376,7 +1402,8 @@ export default function ZellijApp() {
                     r={(sel ? 10 : 7) / view.scale}
                     fill={sel ? '#C58A3A' : COLOR.canvas}
                     stroke="#3A2E1F"
-                    strokeWidth={(sel ? 2.5 : 1.2) / view.scale}
+                    strokeWidth={sel ? 2.5 : 1.2}
+                    vectorEffect="non-scaling-stroke"
                     style={{ cursor: 'pointer' }}
                     onPointerDown={(e) => {
                       const pos = getEventPos(e);
@@ -1416,7 +1443,8 @@ export default function ZellijApp() {
             {snapIndicator && (
               <g>
                 <circle cx={snapIndicator.x} cy={snapIndicator.y} r={10 / view.scale}
-                  fill="none" stroke="#C58A3A" strokeWidth={2 / view.scale} />
+                  fill="none" stroke="#C58A3A" strokeWidth={2}
+                  vectorEffect="non-scaling-stroke" />
                 <circle cx={snapIndicator.x} cy={snapIndicator.y} r={3 / view.scale} fill="#C58A3A" />
               </g>
             )}
@@ -1719,9 +1747,18 @@ function addPlacedTileHandles(handles, pt, tile, id, {
 //   { type: 'line',        a, b }
 //   { type: 'arc',         center, radius, ang1, ang2 }
 //   { type: 'wholeCircle', center, radius }
-function StrokedShape({ shape, scale, stroke, strokeWidth, opacity = 1, lineCap, pointerEvents }) {
-  const sw = strokeWidth / scale;
-  const common = { stroke, strokeWidth: sw, fill: 'none', opacity };
+// `strokeWidth` is in screen pixels. `vector-effect: non-scaling-stroke` keeps
+// the stroke at that pixel width regardless of the surrounding SVG transform —
+// so we don't recompute width props on zoom, and React doesn't have to walk
+// every stroked element when the view scale changes.
+function StrokedShape({ shape, stroke, strokeWidth, opacity = 1, lineCap, pointerEvents }) {
+  const common = {
+    stroke,
+    strokeWidth,
+    fill: 'none',
+    opacity,
+    vectorEffect: 'non-scaling-stroke',
+  };
   if (lineCap) common.strokeLinecap = lineCap;
   if (pointerEvents !== undefined) common.pointerEvents = pointerEvents;
 
@@ -1749,18 +1786,23 @@ const polyRejectedShape = (seg) => seg.type === 'lineSeg'
   : seg;
 
 function Handle({ h, scale }) {
+  // Handle geometry (radius, line endpoints, glyph offsets) is in world units
+  // and stays scale-dependent — no SVG attribute makes a circle's radius
+  // immune to the parent transform. Stroke widths and dasharrays use
+  // non-scaling-stroke so they don't churn React props on zoom.
   return (
     <g style={{ pointerEvents: 'none' }}>
       {h.showTether && h.kind === 'rotate' && h.pivot && (
         <line x1={h.pivot.x} y1={h.pivot.y} x2={h.x} y2={h.y}
-          stroke="#9C8A6A" strokeWidth={1 / scale}
-          strokeDasharray={`${3 / scale} ${3 / scale}`} />
+          stroke="#9C8A6A" strokeWidth={1} strokeDasharray="3 3"
+          vectorEffect="non-scaling-stroke" />
       )}
       <circle cx={h.x} cy={h.y} r={HANDLE_R / scale}
-        fill={COLOR.canvas} stroke="#3A2E1F" strokeWidth={1.5 / scale} />
+        fill={COLOR.canvas} stroke="#3A2E1F" strokeWidth={1.5}
+        vectorEffect="non-scaling-stroke" />
       {h.kind === 'rotate'   && <circle cx={h.x} cy={h.y} r={(HANDLE_R - 6) / scale} fill="#3A2E1F" />}
-      {h.kind === 'lengthen' && <line x1={h.x - 5 / scale} y1={h.y} x2={h.x + 5 / scale} y2={h.y} stroke="#3A2E1F" strokeWidth={2 / scale} />}
-      {h.kind === 'lengthen' && <line x1={h.x} y1={h.y - 5 / scale} x2={h.x} y2={h.y + 5 / scale} stroke="#3A2E1F" strokeWidth={2 / scale} />}
+      {h.kind === 'lengthen' && <line x1={h.x - 5 / scale} y1={h.y} x2={h.x + 5 / scale} y2={h.y} stroke="#3A2E1F" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
+      {h.kind === 'lengthen' && <line x1={h.x} y1={h.y - 5 / scale} x2={h.x} y2={h.y + 5 / scale} stroke="#3A2E1F" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
       {h.kind === 'radius'   && <circle cx={h.x} cy={h.y} r={(HANDLE_R - 8) / scale} fill="#3A2E1F" />}
       {h.kind === 'center'   && <text x={h.x} y={h.y + 4 / scale} textAnchor="middle" fontSize={12 / scale} fill="#3A2E1F">+</text>}
     </g>
