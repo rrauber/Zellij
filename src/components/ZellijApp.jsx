@@ -18,7 +18,7 @@ import { shapesEqual } from '../geometry/shapeEqual.js';
 import { buildFaces, faceContains, faceToPath, signedArea } from '../geometry/planar.js';
 import { newId } from '../geometry/id.js';
 
-import { tilePathD } from '../tiles/tilePath.js';
+import { tilePathD, tilePathDWorld } from '../tiles/tilePath.js';
 import { transformPoint, transformShape, translateShape, edgeToShape } from '../tiles/transform.js';
 
 import { COLOR, FONT_STACK } from '../theme.js';
@@ -134,6 +134,22 @@ export default function ZellijApp() {
     }
     return out;
   }, [inks, lines, circles, placed, tiles]);
+
+  // Every placed tile's silhouette concatenated into a single SVG path string,
+  // in world coords. Rendered as one <path> so the union has no internal
+  // antialiasing seams — adjacent tiles meeting along an edge merge cleanly
+  // instead of leaving a visible hairline. Used to lay the soft tan tint over
+  // the colour fills without breaking the wash with seams.
+  const combinedSilhouettePath = useMemo(() => {
+    if (placed.length === 0) return '';
+    const parts = [];
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      parts.push(tilePathDWorld(tile, pt));
+    }
+    return parts.join(' ');
+  }, [placed, tiles]);
 
   // Un-inked tile edges that coincide with another placed tile's un-inked edge
   // (in world coords) shouldn't render — the two faint strokes would just draw
@@ -1183,13 +1199,12 @@ export default function ZellijApp() {
           onPointerCancel={onPointerUp}
         >
           <g transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}>
-            {/* ---- Background pass for placed tiles ----
-                Silhouette tint, interior construction (gated by showCons), and
-                un-inked tile edges (shared seams already suppressed via
-                sharedEdgeKeys). All faint things go here so the colour-fill
-                pass below draws cleanly on top — without this layering, two
-                adjacent tile silhouettes leave an antialias seam visible
-                through whatever colour is painted across them. */}
+            {/* ---- Under-pass for placed tiles ----
+                Un-inked tile edges only — these are faint outlines that
+                should be hidden under colour fills (so a coloured region
+                doesn't show stray seams) but visible in un-coloured areas.
+                Shared seams between adjacent tiles are already dropped
+                via sharedEdgeKeys. */}
             {placed.map((pt) => {
               const tile = tiles.find((t) => t.id === pt.tileId);
               if (!tile) return null;
@@ -1203,13 +1218,9 @@ export default function ZellijApp() {
                   return s;
                 })
                 .filter(Boolean);
+              if (uninkedEdgeShapes.length === 0) return null;
               return (
                 <g key={`bg-${pt.id}`} transform={transform}>
-                  <path d={tilePathD(tile)} fill="rgba(225,200,150,0.25)" stroke="none" />
-                  {showCons && tile.construction && tile.construction.map((c, i) => (
-                    <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
-                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
-                  ))}
                   {uninkedEdgeShapes.map((s, i) => (
                     <StrokedShape key={`ue-${i}`} shape={s} scale={view.scale}
                       stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
@@ -1218,9 +1229,24 @@ export default function ZellijApp() {
               );
             })}
 
-            {/* Canvas construction (faint, global). On top of tile silhouettes
-                so a construction line is visible across tiles, but still
-                under colours. */}
+            {/* Coloured face fills — bold version. The silhouette pass below
+                adds a translucent tan wash over them so they read as a
+                subtle, slightly muted colour rather than vivid blocks. */}
+            {coloredFaces.map((cf, i) => (
+              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
+            ))}
+
+            {/* Combined silhouette wash — every placed tile's outline as a
+                single <path> so the union renders without internal
+                antialias seams. Lays a soft tan tint over both the colour
+                fills (giving them the washed-out paper feel) and the
+                under-pass un-inked edges. */}
+            {combinedSilhouettePath && (
+              <path d={combinedSilhouettePath} fill="rgba(225,200,150,0.25)" stroke="none" />
+            )}
+
+            {/* Canvas construction (faint, global). Above colours/wash so
+                construction is visible over coloured regions for reference. */}
             {showCons && Object.entries(circles).map(([id, c]) => (
               <circle key={`c-${id}`} cx={c.center.x} cy={c.center.y} r={c.radius}
                 fill="none" stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
@@ -1230,13 +1256,20 @@ export default function ZellijApp() {
                 stroke="#9C8A6A" strokeWidth={1 / view.scale} opacity={0.4} />
             ))}
 
-            {/* Coloured face fills. Render after every faint background layer
-                so any silhouette seam or stray un-inked edge is cleanly
-                covered, but before the inks below so bold strokes still
-                outline coloured regions. */}
-            {coloredFaces.map((cf, i) => (
-              <path key={`fill-${i}`} d={cf.d} fill={cf.color} stroke="none" />
-            ))}
+            {/* Per-tile interior construction (also visible over colours). */}
+            {showCons && placed.map((pt) => {
+              const tile = tiles.find((t) => t.id === pt.tileId);
+              if (!tile?.construction?.length) return null;
+              const transform = `translate(${pt.position.x},${pt.position.y}) rotate(${pt.rotation * 180 / Math.PI}) ${pt.flipped ? 'scale(-1,1)' : ''}`;
+              return (
+                <g key={`mid-${pt.id}`} transform={transform}>
+                  {tile.construction.map((c, i) => (
+                    <StrokedShape key={`tc-${i}`} shape={c} scale={view.scale}
+                      stroke="#9C8A6A" strokeWidth={1} opacity={0.4} />
+                  ))}
+                </g>
+              );
+            })}
 
             {/* Canvas inks */}
             {inkPaths.map((p, i) => (
@@ -1244,10 +1277,10 @@ export default function ZellijApp() {
                 stroke="#1B1B1B" strokeWidth={2.5} lineCap="round" />
             ))}
 
-            {/* ---- Foreground pass for placed tiles ----
-                Bold inked strokes plus the orange selection indicator. These
-                draw on top of colour fills so a coloured region is always
-                outlined by its inks. */}
+            {/* ---- Over-pass for placed tiles ----
+                Bold inks plus the orange selection indicator. Always on top
+                of fills, wash, and construction so the design's structure
+                reads clearly. */}
             {placed.map((pt) => {
               const tile = tiles.find((t) => t.id === pt.tileId);
               if (!tile) return null;
