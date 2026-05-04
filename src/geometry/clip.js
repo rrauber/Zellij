@@ -145,7 +145,17 @@ export function clipWholeCircleByPolygon(center, radius, polyVerts, polyEdges) {
     }
   }
   if (hits.length === 0) {
-    return pointInPoly(center, polyVerts) ? [{ type: 'wholeCircle' }] : [];
+    // No polygon edge crosses the circle — three possibilities:
+    //   (a) circle fully inside polygon: keep whole.
+    //   (b) circle fully outside polygon: discard.
+    //   (c) polygon fully inside circle (small polygon, big circle):
+    //       circle's center is inside the polygon, but the circle's body
+    //       extends way past it — must discard, otherwise we end up
+    //       stamping a giant disk of construction that bleeds out.
+    // To distinguish (a) from (c), test a point on the circle's boundary.
+    if (!pointInPoly(center, polyVerts)) return [];
+    const sample = { x: center.x + radius, y: center.y };
+    return pointInPoly(sample, polyVerts) ? [{ type: 'wholeCircle' }] : [];
   }
   hits.sort((a, b) => a - b);
   const pieces = [];

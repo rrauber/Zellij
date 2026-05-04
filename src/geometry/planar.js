@@ -16,6 +16,7 @@ import { angBetween } from './vec.js';
 import { intersectShapes } from './shapeIntersect.js';
 import { pidForPoint } from './intersections.js';
 import { pointInPoly } from './project.js';
+import { GridIndex, aabbForShape, chooseCellSize } from './spatial.js';
 
 // ---- Stroke parameterisation ----
 
@@ -57,16 +58,53 @@ function strokeEnd(stroke) {
 
 // ---- Build the graph and find faces ----
 
-export function buildFaces(strokes) {
+// `pairCache` (optional) memoises pairwise intersections across rebuilds:
+// when an ink is added or removed, only pairs touching the new ink need
+// fresh computation. Keyed by `${shapeIdA}|${shapeIdB}` (sorted), value is
+// an array of {x, y} world points. The cache is mutated in-place; the
+// caller is responsible for resetting it when a shape's geometry changes
+// (we look up by shapeId, so changing a shape under a stable id without
+// invalidating the cache would yield stale results).
+export function buildFaces(strokes, pairCache = null) {
   // Whole circles ignored for now; they need cyclic-edge handling.
   const inputs = strokes.filter((s) => s && (s.type === 'line' || s.type === 'arc'));
   if (inputs.length === 0) return { faces: [], vertices: new Map() };
 
   // 1. Pairwise intersections → break parameters per input stroke.
+  // Spatial-grid prefilter cuts the O(N²) pair sweep to ~O(N + K) where K is
+  // the number of AABB-overlapping pairs. AABB test is then a final guard
+  // before paying for the exact intersection.
+  const aabbs = inputs.map(aabbForShape);
+  const grid = new GridIndex(chooseCellSize(aabbs));
+  for (let i = 0; i < inputs.length; i++) grid.insert(i, aabbs[i]);
+
   const breaks = inputs.map(() => []);
+  const seenPair = new Set(); // dedupe symmetric query hits
   for (let i = 0; i < inputs.length; i++) {
-    for (let j = i + 1; j < inputs.length; j++) {
-      const points = intersectShapes(inputs[i], inputs[j]);
+    const candidates = grid.query(aabbs[i]);
+    for (const j of candidates) {
+      if (j <= i) continue; // each pair once
+      const pairKey = `${i},${j}`;
+      if (seenPair.has(pairKey)) continue;
+      seenPair.add(pairKey);
+
+      // Pair-intersection cache: keyed by stable shape ids if both inputs
+      // carry one. Falls back to a fresh compute when ids are missing.
+      const idA = inputs[i].shapeId;
+      const idB = inputs[j].shapeId;
+      let points;
+      if (pairCache && idA && idB) {
+        const cacheKey = idA < idB ? `${idA}|${idB}` : `${idB}|${idA}`;
+        if (pairCache.has(cacheKey)) {
+          points = pairCache.get(cacheKey);
+        } else {
+          points = intersectShapes(inputs[i], inputs[j]);
+          pairCache.set(cacheKey, points);
+        }
+      } else {
+        points = intersectShapes(inputs[i], inputs[j]);
+      }
+
       for (const p of points) {
         breaks[i].push({ t: paramOnStroke(inputs[i], p), x: p.x, y: p.y });
         breaks[j].push({ t: paramOnStroke(inputs[j], p), x: p.x, y: p.y });
@@ -78,6 +116,7 @@ export function buildFaces(strokes) {
   const pieces = [];
   for (let i = 0; i < inputs.length; i++) {
     const stroke = inputs[i];
+    const isBoundary = !!stroke.isBoundary;
     breaks[i].sort((a, b) => a.t - b.t);
     // Dedupe (same intersection point can appear twice if two crossings collide).
     const deduped = [];
@@ -93,7 +132,7 @@ export function buildFaces(strokes) {
       const A = pts[k], B = pts[k + 1];
       if (B.t - A.t < EPS) continue;
       if (stroke.type === 'line') {
-        pieces.push({ type: 'line', a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y } });
+        pieces.push({ type: 'line', a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y }, isBoundary });
       } else {
         const angA = angBetween(stroke.center, A);
         const angB = angBetween(stroke.center, B);
@@ -102,6 +141,7 @@ export function buildFaces(strokes) {
           center: stroke.center,
           radius: stroke.radius,
           ang1: angA, ang2: angB,
+          isBoundary,
         });
       }
     }

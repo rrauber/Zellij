@@ -16,9 +16,10 @@ import { clipLineByPolygon, clipArcByPolygon, clipWholeCircleByPolygon } from '.
 import { intersectShapes } from '../geometry/shapeIntersect.js';
 import { shapesEqual } from '../geometry/shapeEqual.js';
 import { buildFaces, faceContains, faceToPath, signedArea } from '../geometry/planar.js';
+import { GridIndex, aabbForShape, chooseCellSize } from '../geometry/spatial.js';
 import { newId } from '../geometry/id.js';
 
-import { tilePathD, tilePathDWorld } from '../tiles/tilePath.js';
+import { tilePathD } from '../tiles/tilePath.js';
 import { transformPoint, transformShape, translateShape, edgeToShape } from '../tiles/transform.js';
 
 import { COLOR, FONT_STACK } from '../theme.js';
@@ -92,6 +93,24 @@ export default function ZellijApp() {
   const cachedFacesRef = useRef([]);
   const cachedTileIntersRef = useRef([]);
 
+  // Pair-intersection cache for buildFaces. Keyed by sorted pair of stable
+  // shape ids (which are functions of world geometry). When a single ink is
+  // added or moved, only pairs involving that shape miss the cache; everything
+  // else returns its previously-computed intersection points. Pruned to the
+  // current shape set after each build to keep memory bounded.
+  const pairCacheRef = useRef(new Map());
+
+  // Per-tile pairwise intersection cache (in tile-LOCAL coordinates). The
+  // intersections of a tile's edges/inks/construction with each other depend
+  // only on the tile's own geometry, not on its placement. So one compute per
+  // distinct tile is enough — every placement reuses the same local points,
+  // transformed into world space via transformPoint.
+  //
+  // Keyed by the tile object reference (not its id) — tile edits return fresh
+  // objects via { ...t, inks: [...] }, so new geometry implicitly misses the
+  // cache, and orphaned entries get GC'd along with their tile object.
+  const tileLocalIntersRef = useRef(new WeakMap()); // tile -> [{x,y,isConstruction}]
+
   const { lineHits, circleHits, intersections } = useMemo(
     () => computeIntersections(lines, circles),
     [lines, circles],
@@ -116,78 +135,40 @@ export default function ZellijApp() {
     });
   }, []);
 
-  // ============================ INK GRAPH (for fills) ============================
-  // Every visible ink in world coords, as stroked-shapes. Inputs to the planar
-  // face finder: any ink that bounds a coloured region needs to be in here.
-  const globalInkShapes = useMemo(() => {
-    const out = [];
-    // Canvas inks are stored line/circle-relative; resolve to world geometry.
-    for (const ink of inks) {
-      if (ink.type === 'lineSeg') {
-        const L = lines[ink.lineId];
-        if (!L) continue;
-        out.push({ type: 'line', a: lerp(L.p1, L.p2, ink.t1), b: lerp(L.p1, L.p2, ink.t2) });
-      } else if (ink.type === 'arc') {
-        const C = circles[ink.circleId];
-        if (!C) continue;
-        out.push({ type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2 });
-      } else if (ink.type === 'wholeCircle') {
-        const C = circles[ink.circleId];
-        if (!C) continue;
-        out.push({ type: 'wholeCircle', center: C.center, radius: C.radius });
-      }
-    }
-    // Placed-tile inks (already stored as stroked-shapes in tile-local coords).
-    for (const pt of placed) {
-      const tile = tiles.find((t) => t.id === pt.tileId);
-      if (!tile) continue;
-      for (const ink of tile.inks || []) out.push(transformShape(ink, pt));
-    }
-    return out;
-  }, [inks, lines, circles, placed, tiles]);
-
-  // Every placed tile's silhouette concatenated into a single SVG path string,
-  // in world coords. Rendered as one <path> so the union has no internal
-  // antialiasing seams — adjacent tiles meeting along an edge merge cleanly
-  // instead of leaving a visible hairline. Used to lay the soft tan tint over
-  // the colour fills without breaking the wash with seams.
-  const combinedSilhouettePath = useMemo(() => {
-    if (placed.length === 0) return '';
-    const parts = [];
-    for (const pt of placed) {
-      const tile = tiles.find((t) => t.id === pt.tileId);
-      if (!tile) continue;
-      parts.push(tilePathDWorld(tile, pt));
-    }
-    return parts.join(' ');
-  }, [placed, tiles]);
-
-  // Un-inked tile edges that coincide with another placed tile's un-inked edge
-  // (in world coords) shouldn't render — the two faint strokes would just draw
-  // on top of each other at the seam between adjacent tiles. We only suppress
-  // un-inked seams; an inked edge always renders bold regardless of whether
-  // its neighbour also inked the shared edge.
-  //
-  // Keyed by `${placedId}:${edgeIdx}` so the per-tile render can quickly check
-  // whether to skip a given edge.
+  // ============================ TILE-BOUNDARY ADJACENCY ============================
+  // Set of `${placedId}:${edgeIdx}` keys for tile-boundary edges that coincide
+  // (in world coords) with another placed tile's boundary edge — i.e. the seam
+  // between two adjacent placements. globalInkShapes uses this to decide which
+  // boundary inks should mark their face as "tile-only" (not fillable as a unit
+  // — only the sub-faces created by interior inks should be).
   const cachedSharedEdgesRef = useRef(new Set());
-  const sharedEdgeKeys = useMemo(() => {
+  const sharedBoundaryEdgeKeys = useMemo(() => {
     if (isDragging) return cachedSharedEdgesRef.current;
     if (placed.length < 2) return new Set();
-    const all = []; // [{ key, worldShape }]
+    const all = []; // [{ key, worldShape, aabb }]
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
       for (let i = 0; i < tile.edges.length; i++) {
         const localShape = edgeToShape(tile.edges[i], tile.vertices);
         if (!localShape) continue;
-        if ((tile.inks || []).some((ink) => shapesEqual(localShape, ink))) continue;
-        all.push({ key: `${pt.id}:${i}`, worldShape: transformShape(localShape, pt) });
+        const worldShape = transformShape(localShape, pt);
+        all.push({ key: `${pt.id}:${i}`, worldShape, aabb: aabbForShape(worldShape) });
       }
     }
+    // Spatial-index the boundary edges so we only run shapesEqual on pairs
+    // whose AABBs overlap.
+    const grid = new GridIndex(chooseCellSize(all.map((x) => x.aabb)));
+    for (let i = 0; i < all.length; i++) grid.insert(i, all[i].aabb);
     const shared = new Set();
+    const seen = new Set();
     for (let i = 0; i < all.length; i++) {
-      for (let j = i + 1; j < all.length; j++) {
+      const candidates = grid.query(all[i].aabb);
+      for (const j of candidates) {
+        if (j <= i) continue;
+        const k = `${i},${j}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
         if (shapesEqual(all[i].worldShape, all[j].worldShape)) {
           shared.add(all[i].key);
           shared.add(all[j].key);
@@ -198,6 +179,74 @@ export default function ZellijApp() {
     return shared;
   }, [placed, tiles, isDragging]);
 
+  // ============================ INK GRAPH (for fills) ============================
+  // Every visible ink in world coords, as stroked-shapes. Inputs to the planar
+  // face finder: any ink that bounds a coloured region needs to be in here.
+  const globalInkShapes = useMemo(() => {
+    const out = [];
+    // shapeId is a stable string keyed off the resolved world-space geometry.
+    // Two shapes with identical geometry get the same id — that's by design,
+    // because their pair intersections with any third shape are also identical
+    // and can share a cache entry.
+    const idLine = (a, b) => `L_${a.x}_${a.y}_${b.x}_${b.y}`;
+    const idArc = (c, r, a1, a2) => `A_${c.x}_${c.y}_${r}_${a1}_${a2}`;
+    const idCirc = (c, r) => `C_${c.x}_${c.y}_${r}`;
+
+    // Canvas inks are stored line/circle-relative; resolve to world geometry.
+    for (const ink of inks) {
+      if (ink.type === 'lineSeg') {
+        const L = lines[ink.lineId];
+        if (!L) continue;
+        const a = lerp(L.p1, L.p2, ink.t1), b = lerp(L.p1, L.p2, ink.t2);
+        out.push({ type: 'line', a, b, shapeId: idLine(a, b) });
+      } else if (ink.type === 'arc') {
+        const C = circles[ink.circleId];
+        if (!C) continue;
+        out.push({
+          type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2,
+          shapeId: idArc(C.center, C.radius, ink.ang1, ink.ang2),
+        });
+      } else if (ink.type === 'wholeCircle') {
+        const C = circles[ink.circleId];
+        if (!C) continue;
+        out.push({
+          type: 'wholeCircle', center: C.center, radius: C.radius,
+          shapeId: idCirc(C.center, C.radius),
+        });
+      }
+    }
+    // Placed-tile inks (already stored as stroked-shapes in tile-local coords).
+    // Tag an ink as a boundary ink only when it sits on a tile-boundary edge
+    // that is *also shared with another placed tile* — i.e. an internal seam
+    // between adjacent placements. planarFaces uses this flag to exclude
+    // faces bounded entirely by such seams (the whole-tile interior of an
+    // adjacent pair shouldn't be a single fill target — its sub-faces from
+    // interior inks are). Outer-perimeter boundary inks DON'T get the flag,
+    // so a face bounded by them remains fillable.
+    for (const pt of placed) {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) continue;
+      for (const ink of tile.inks || []) {
+        let boundaryIdx = -1;
+        for (let i = 0; i < (tile.edges || []).length; i++) {
+          const s = edgeToShape(tile.edges[i], tile.vertices);
+          if (s && shapesEqual(s, ink)) { boundaryIdx = i; break; }
+        }
+        const isSharedBoundary =
+          boundaryIdx >= 0 && sharedBoundaryEdgeKeys.has(`${pt.id}:${boundaryIdx}`);
+        const w = transformShape(ink, pt);
+        let shapeId;
+        if (w.type === 'line')             shapeId = idLine(w.a, w.b);
+        else if (w.type === 'arc')         shapeId = idArc(w.center, w.radius, w.ang1, w.ang2);
+        else if (w.type === 'wholeCircle') shapeId = idCirc(w.center, w.radius);
+        const tagged = { ...w, shapeId };
+        if (isSharedBoundary) tagged.isBoundary = true;
+        out.push(tagged);
+      }
+    }
+    return out;
+  }, [inks, lines, circles, placed, tiles, sharedBoundaryEdgeKeys]);
+
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
   // pick the smallest containing face (most specific region). The graph build
   // is O(N²) in ink count for the intersection step — fast enough at rest,
@@ -206,8 +255,23 @@ export default function ZellijApp() {
   // once when the drag ends.
   const planarFaces = useMemo(() => {
     if (isDragging) return cachedFacesRef.current;
-    const { faces, vertices } = buildFaces(globalInkShapes);
-    const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
+    const { faces, vertices } = buildFaces(globalInkShapes, pairCacheRef.current);
+
+    // Prune pair cache: drop entries whose ids aren't in the current shape set.
+    // Without this the cache grows on every edit; with it, memory tracks the
+    // live shape count.
+    const liveIds = new Set();
+    for (const s of globalInkShapes) if (s.shapeId) liveIds.add(s.shapeId);
+    for (const key of pairCacheRef.current.keys()) {
+      const sep = key.indexOf('|');
+      const a = key.slice(0, sep), b = key.slice(sep + 1);
+      if (!liveIds.has(a) || !liveIds.has(b)) pairCacheRef.current.delete(key);
+    }
+
+    // Exclude faces whose every edge came from a tile boundary ink — those faces
+    // are the tile's own interior, not a subdivision created by interior inks.
+    const fillable = faces.filter((face) => face.some((he) => !he.piece.isBoundary));
+    const withArea = fillable.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
     withArea.sort((a, b) => a.area - b.area);
     cachedFacesRef.current = withArea;
     return withArea;
@@ -238,41 +302,89 @@ export default function ZellijApp() {
     if (isDragging) return cachedTileIntersRef.current;
     if (placed.length === 0) return [];
     const out = [];
+
+    // Canvas shapes go in a spatial grid so tile-vs-canvas crossings only test
+    // pairs whose AABBs overlap, not all M*N pairs.
     const canvasShapes = [
       ...Object.values(lines).map((l) => ({ type: 'line', a: l.p1, b: l.p2 })),
       ...Object.values(circles).map((c) => ({ type: 'wholeCircle', center: c.center, radius: c.radius })),
     ];
+    const canvasAabbs = canvasShapes.map(aabbForShape);
+    const canvasGrid = new GridIndex(chooseCellSize(canvasAabbs));
+    for (let i = 0; i < canvasShapes.length; i++) canvasGrid.insert(i, canvasAabbs[i]);
+
+    // Tile-internal intersections only depend on the tile's own geometry — cache
+    // them once per tileId in tile-LOCAL coords, then transform on use. A
+    // symmetric design that places the same tile dozens of times now pays the
+    // pairwise cost just once.
+    const computeTileLocal = (tile) => {
+      const localShapes = [
+        ...(tile.edges || []).map((e) => ({ shape: edgeToShape(e, tile.vertices), isCons: false })),
+        ...(tile.inks || []).map((s) => ({ shape: s, isCons: false })),
+        ...(tile.construction || []).map((s) => ({ shape: s, isCons: true })),
+      ].filter((x) => x.shape);
+
+      const aabbs = localShapes.map((x) => aabbForShape(x.shape));
+      const tileGrid = new GridIndex(chooseCellSize(aabbs));
+      for (let i = 0; i < localShapes.length; i++) tileGrid.insert(i, aabbs[i]);
+
+      const points = [];
+      const seen = new Set();
+      for (let i = 0; i < localShapes.length; i++) {
+        const candidates = tileGrid.query(aabbs[i]);
+        for (const j of candidates) {
+          if (j <= i) continue;
+          const key = `${i},${j}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const isCons = localShapes[i].isCons || localShapes[j].isCons;
+          for (const p of intersectShapes(localShapes[i].shape, localShapes[j].shape)) {
+            points.push({ x: p.x, y: p.y, isCons });
+          }
+        }
+      }
+      return points;
+    };
+
+    const tileCache = tileLocalIntersRef.current;
+
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
 
-      const edgesCount = (tile.edges || []).length;
-      const inksCount = (tile.inks || []).length;
-      
-      const tileShapes = [
-        ...(tile.edges || []).map((e) => ({ shape: edgeToShape(e, tile.vertices), isCons: false })),
-        ...(tile.inks || []).map((s) => ({ shape: s, isCons: false })),
-        ...(tile.construction || []).map((s) => ({ shape: s, isCons: true })),
-      ].filter(x => x.shape).map((x) => ({ shape: transformShape(x.shape, pt), isCons: x.isCons }));
-
-      // Pairwise within this placed tile.
-      for (let i = 0; i < tileShapes.length; i++) {
-        for (let j = i + 1; j < tileShapes.length; j++) {
-          const isConsCrossing = tileShapes[i].isCons || tileShapes[j].isCons;
-          for (const p of intersectShapes(tileShapes[i].shape, tileShapes[j].shape)) {
-            out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: isConsCrossing });
-          }
-        }
+      let local = tileCache.get(tile);
+      if (!local) {
+        local = computeTileLocal(tile);
+        tileCache.set(tile, local);
       }
-      // Each tile shape vs every canvas shape (canvas shapes are always construction).
-      for (const ts of tileShapes) {
-        for (const cs of canvasShapes) {
-          for (const p of intersectShapes(ts.shape, cs)) {
-            out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: true });
+      // Transform cached local points into world coords for this placement.
+      for (const lp of local) {
+        const w = transformPoint(lp, pt);
+        out.push({ x: w.x, y: w.y, kind: 'tile-intersection', isConstruction: lp.isCons });
+      }
+
+      // Tile×canvas crossings need world geometry, so they can't share the
+      // local cache — but the spatial grid keeps the cost proportional to
+      // actual overlaps rather than the full M*N.
+      const tileWorldShapes = [
+        ...(tile.edges || []).map((e) => ({ shape: edgeToShape(e, tile.vertices) })),
+        ...(tile.inks || []).map((s) => ({ shape: s })),
+        ...(tile.construction || []).map((s) => ({ shape: s })),
+      ].filter((x) => x.shape).map((x) => transformShape(x.shape, pt));
+
+      if (canvasShapes.length > 0) {
+        for (const ts of tileWorldShapes) {
+          const tsAabb = aabbForShape(ts);
+          const candidates = canvasGrid.query(tsAabb);
+          for (const ci of candidates) {
+            for (const p of intersectShapes(ts, canvasShapes[ci])) {
+              out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: true });
+            }
           }
         }
       }
     }
+
     cachedTileIntersRef.current = out;
     return out;
   }, [placed, tiles, lines, circles, isDragging]);
@@ -874,6 +986,8 @@ export default function ZellijApp() {
       boundaryInks.push(toLocal(polyEdgesWorld[i]));
     }
 
+    // ---- 3. Canvas inks inside the polygon, clipped at boundary ----
+    const inksInside = [];
     const captureClipped = (worldShape, sink) => {
       // Fast bounding box check
       let sMinX = Infinity, sMaxX = -Infinity, sMinY = Infinity, sMaxY = -Infinity;
@@ -940,32 +1054,30 @@ export default function ZellijApp() {
       }
     }
 
-    // ---- 4. Construction sub-segments inside, clipped at boundary ----
-    // Without clipping, a sub-segment that straddles the boundary either gets
-    // accepted whole (extending past the tile) or rejected whole (a piece that
-    // *should* be inside disappears). Clipping keeps every piece's geometry
-    // honest and preserves canonical intersection points for sub-segments that
-    // share a pid (their endpoints stay fp-exact).
+    // ---- 4. Construction inside (whole shapes; render-time clip masks the boundary) ----
+    // CanvasRenderer applies a tile-silhouette clip when drawing tile.construction,
+    // so anything we store here gets visually trimmed to the polygon at paint
+    // time. No need to split canvas lines/circles into sub-segments or run them
+    // through captureClipped — just transform whole shapes into tile-local coords
+    // and skip those whose AABB is entirely outside the polygon's bbox.
     const constructionInside = [];
-    for (const id in lineHits) {
-      for (const s of getLineSegments(lineHits, id)) {
-        captureClipped({ type: 'line', a: s.a, b: s.b }, constructionInside);
-      }
+    const aabbInsidePolyBbox = (sMinX, sMinY, sMaxX, sMaxY) =>
+      !(sMaxX < minX || sMinX > maxX || sMaxY < minY || sMinY > maxY);
+    for (const id in lines) {
+      const L = lines[id];
+      if (!aabbInsidePolyBbox(
+        Math.min(L.p1.x, L.p2.x), Math.min(L.p1.y, L.p2.y),
+        Math.max(L.p1.x, L.p2.x), Math.max(L.p1.y, L.p2.y),
+      )) continue;
+      constructionInside.push(toLocal({ type: 'line', a: L.p1, b: L.p2 }));
     }
-    for (const id in circleHits) {
-      const C = circles[id];
-      if (!C) continue;
-      for (const arc of getCircleArcs(circleHits, id, C)) {
-        captureClipped({ type: 'arc', center: C.center, radius: C.radius, ang1: arc.ang1, ang2: arc.ang2 }, constructionInside);
-      }
-    }
-    // Whole-circle construction (no intersections): the clip helper will keep
-    // it whole if the centre is inside, or split it into arcs if a polygon
-    // edge happens to clip through it.
     for (const id in circles) {
-      if ((circleHits[id] || []).length > 0) continue;
       const C = circles[id];
-      captureClipped({ type: 'wholeCircle', center: C.center, radius: C.radius }, constructionInside);
+      if (!aabbInsidePolyBbox(
+        C.center.x - C.radius, C.center.y - C.radius,
+        C.center.x + C.radius, C.center.y + C.radius,
+      )) continue;
+      constructionInside.push(toLocal({ type: 'wholeCircle', center: C.center, radius: C.radius }));
     }
 
     // ---- 5. Flatten placed tiles whose centroid is inside ----
@@ -981,10 +1093,12 @@ export default function ZellijApp() {
       if (!tile) continue;
       const centroidWorld = transformPoint({ x: 0, y: 0 }, pt); // tile-local origin = its centroid
       if (!pointInPoly(centroidWorld, polyVerts)) continue;
-      // The flattened inks/construction can extend past the polygon if the
-      // placed tile only partially overlaps it, so clip them too.
+      // Inks need to stay within the polygon (no render-time clip on the ink
+      // pass), so they go through captureClipped. Construction is masked at
+      // paint time by the silhouette clip, so we just transform whole shapes
+      // into tile-local coords and skip the clipper.
       for (const ink of tile.inks) captureClipped(transformShape(ink, pt), flattenedInks);
-      for (const c   of tile.construction) captureClipped(transformShape(c, pt), flattenedCons);
+      for (const c   of tile.construction) flattenedCons.push(toLocal(transformShape(c, pt)));
       // Boundary edges of the constituent tile carry into the parent at the
       // same boldness: inked → parent's inks (bold), un-inked → parent's
       // construction (faint). An inked edge already has a matching shape in
@@ -996,7 +1110,7 @@ export default function ZellijApp() {
         if (!localShape) continue;
         const isInked = (tile.inks || []).some((ink) => shapesEqual(localShape, ink));
         if (isInked) continue; // already captured via tile.inks above
-        captureClipped(transformShape(localShape, pt), flattenedCons);
+        flattenedCons.push(toLocal(transformShape(localShape, pt)));
       }
     }
 
@@ -1013,6 +1127,13 @@ export default function ZellijApp() {
       inks: [...boundaryInks, ...inksInside, ...flattenedInks],
       construction: [...constructionInside, ...flattenedCons],
     }]);
+
+    // Polygon finalization is non-destructive: canvas construction (lines,
+    // circles, inks) stays exactly as the user drew it. The new tile already
+    // carries its own clipped copy of the interior construction in
+    // tile-local coords, so when it gets stamped only the inside portions
+    // are duplicated — without us touching the original scaffold.
+
     setSheetOpen(true);
   };
 
@@ -1348,9 +1469,7 @@ export default function ZellijApp() {
             showCons={showCons}
             isDragging={isDragging}
             containerSize={containerSize}
-            sharedEdgeKeys={sharedEdgeKeys}
             inkPaths={inkPaths}
-            combinedSilhouettePath={combinedSilhouettePath}
             editing={editing}
           />
         </div>
