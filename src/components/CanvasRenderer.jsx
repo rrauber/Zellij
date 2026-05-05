@@ -358,35 +358,86 @@ export default function CanvasRenderer({
       ctx.stroke();
 
       if (h.kind === 'rotate') {
-        ctx.fillStyle = '#3A2E1F';
-        ctx.beginPath();
-        ctx.arc(h.x, h.y, (HANDLE_R - 6) / view.scale, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      if (h.kind === 'lengthen') {
+        // Two arc segments on the axis perpendicular to pivot→handle, each
+        // capped with a filled triangular arrowhead pointing FORWARD past
+        // the arc end. The arc terminates at the triangle's base so they
+        // meet smoothly without the arrowhead-wings-cross-the-shaft problem
+        // of an open chevron.
         ctx.strokeStyle = '#3A2E1F';
-        ctx.lineWidth = 2 / view.scale;
-        ctx.beginPath();
-        ctx.moveTo(h.x - 5 / view.scale, h.y);
-        ctx.lineTo(h.x + 5 / view.scale, h.y);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(h.x, h.y - 5 / view.scale);
-        ctx.lineTo(h.x, h.y + 5 / view.scale);
-        ctx.stroke();
-      }
-      if (h.kind === 'radius') {
         ctx.fillStyle = '#3A2E1F';
+        ctx.lineWidth = 1.6 / view.scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        let radialAngle = 0;
+        if (h.pivot && (h.x !== h.pivot.x || h.y !== h.pivot.y)) {
+          radialAngle = Math.atan2(h.y - h.pivot.y, h.x - h.pivot.x);
+        }
+        const r = 8 / view.scale;       // arc radius (HANDLE_R is 14)
+        const span = 1.3;               // arc span in radians (~75°)
+        const headLen = 4 / view.scale; // arrowhead length along tangent
+        const headHalf = 2.5 / view.scale; // arrowhead half-width
+        for (const offset of [Math.PI / 2, -Math.PI / 2]) {
+          const center = radialAngle + offset;
+          const startA = center - span / 2;
+          const endA = center + span / 2;
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, r, startA, endA);
+          ctx.stroke();
+          // Tangent + radial at endA.
+          const ex = h.x + r * Math.cos(endA);
+          const ey = h.y + r * Math.sin(endA);
+          const tx = -Math.sin(endA), ty = Math.cos(endA); // CCW tangent
+          const nx = Math.cos(endA), ny = Math.sin(endA);  // outward radial (perp to tangent)
+          // Triangle: tip forward along tangent, base perpendicular at arc end.
+          ctx.beginPath();
+          ctx.moveTo(ex + tx * headLen, ey + ty * headLen);
+          ctx.lineTo(ex + nx * headHalf, ey + ny * headHalf);
+          ctx.lineTo(ex - nx * headHalf, ey - ny * headHalf);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      if (h.kind === 'lengthen' || h.kind === 'radius') {
+        // Arrow pointing outward in the extension direction. Geometrically
+        // centered on the handle so the icon sits in the middle of the
+        // handle circle.
+        const dir = h.dir || { x: 1, y: 0 };
+        ctx.strokeStyle = '#3A2E1F';
+        ctx.lineWidth = 1.8 / view.scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const half = 7 / view.scale;    // half-shaft (HANDLE_R is 14)
+        const tipX = h.x + dir.x * half;
+        const tipY = h.y + dir.y * half;
+        const baseX = h.x - dir.x * half;
+        const baseY = h.y - dir.y * half;
         ctx.beginPath();
-        ctx.arc(h.x, h.y, (HANDLE_R - 8) / view.scale, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.moveTo(baseX, baseY);
+        ctx.lineTo(tipX, tipY);
+        ctx.stroke();
+        const head = 5 / view.scale;
+        const px = -dir.y, py = dir.x; // perpendicular to dir
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - dir.x * head + px * head * 0.6, tipY - dir.y * head + py * head * 0.6);
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - dir.x * head - px * head * 0.6, tipY - dir.y * head - py * head * 0.6);
+        ctx.stroke();
       }
       if (h.kind === 'center') {
-        ctx.fillStyle = '#3A2E1F';
-        ctx.font = `${12 / view.scale}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('+', h.x, h.y + 1 / view.scale);
+        // Drawn as two stroked lines instead of a text glyph so it sits
+        // exactly at the handle center — text-baseline geometry is fonty
+        // and never quite lands centered.
+        ctx.strokeStyle = '#3A2E1F';
+        ctx.lineWidth = 1.8 / view.scale;
+        ctx.lineCap = 'round';
+        const arm = 5 / view.scale;
+        ctx.beginPath();
+        ctx.moveTo(h.x - arm, h.y);
+        ctx.lineTo(h.x + arm, h.y);
+        ctx.moveTo(h.x, h.y - arm);
+        ctx.lineTo(h.x, h.y + arm);
+        ctx.stroke();
       }
     });
 

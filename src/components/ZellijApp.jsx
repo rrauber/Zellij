@@ -1579,6 +1579,7 @@ function addLineHandles(handles, L, id, { view, updateLine, snapTargets, setSnap
   // 1. Length at A (P1) — pivot at P2, axis from P2 toward P1.
   handles.push({
     kind: 'lengthen', x: L.p1.x, y: L.p1.y,
+    dir: { x: -dirUnit.x, y: -dirUnit.y }, // outward extension direction (renderer uses this for the arrow)
     onMove: lengthenWithSnap(L.p2, { x: -dirUnit.x, y: -dirUnit.y }, (newP1) => updateLine(id, { p1: newP1 })),
     allowSnap: false,
   });
@@ -1618,6 +1619,7 @@ function addLineHandles(handles, L, id, { view, updateLine, snapTargets, setSnap
   // 5. Length at C (P2) — pivot at P1, axis from P1 toward P2.
   handles.push({
     kind: 'lengthen', x: L.p2.x, y: L.p2.y,
+    dir: { x: dirUnit.x, y: dirUnit.y },
     onMove: lengthenWithSnap(L.p1, dirUnit, (newP2) => updateLine(id, { p2: newP2 })),
     allowSnap: false,
   });
@@ -1638,8 +1640,14 @@ function addCircleHandles(handles, C, id, { updateCircle }) {
   });
 
   const rPt = C.radiusPt || { x: C.center.x + C.radius, y: C.center.y };
+  // Outward direction (center → radiusPt) for the renderer's arrow icon.
+  const radDx = rPt.x - C.center.x;
+  const radDy = rPt.y - C.center.y;
+  const radLen = Math.hypot(radDx, radDy);
+  const radDir = radLen > EPS ? { x: radDx / radLen, y: radDy / radLen } : { x: 1, y: 0 };
   handles.push({
     kind: 'radius', x: rPt.x, y: rPt.y,
+    dir: radDir,
     onMove: (snap) => {
       const r = dist(C.center, snap);
       if (r > EPS) updateCircle(id, { radius: r, radiusPt: { x: snap.x, y: snap.y } });
