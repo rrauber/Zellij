@@ -116,7 +116,6 @@ export function buildFaces(strokes, pairCache = null) {
   const pieces = [];
   for (let i = 0; i < inputs.length; i++) {
     const stroke = inputs[i];
-    const isBoundary = !!stroke.isBoundary;
     breaks[i].sort((a, b) => a.t - b.t);
     // Dedupe (same intersection point can appear twice if two crossings collide).
     const deduped = [];
@@ -132,7 +131,7 @@ export function buildFaces(strokes, pairCache = null) {
       const A = pts[k], B = pts[k + 1];
       if (B.t - A.t < EPS) continue;
       if (stroke.type === 'line') {
-        pieces.push({ type: 'line', a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y }, isBoundary });
+        pieces.push({ type: 'line', a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y } });
       } else {
         const angA = angBetween(stroke.center, A);
         const angB = angBetween(stroke.center, B);
@@ -141,7 +140,6 @@ export function buildFaces(strokes, pairCache = null) {
           center: stroke.center,
           radius: stroke.radius,
           ang1: angA, ang2: angB,
-          isBoundary,
         });
       }
     }

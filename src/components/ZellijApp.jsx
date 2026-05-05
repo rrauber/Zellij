@@ -135,53 +135,12 @@ export default function ZellijApp() {
     });
   }, []);
 
-  // ============================ TILE-BOUNDARY ADJACENCY ============================
-  // Set of `${placedId}:${edgeIdx}` keys for tile-boundary edges that coincide
-  // (in world coords) with another placed tile's boundary edge — i.e. the seam
-  // between two adjacent placements. globalInkShapes uses this to decide which
-  // boundary inks should mark their face as "tile-only" (not fillable as a unit
-  // — only the sub-faces created by interior inks should be).
-  const cachedSharedEdgesRef = useRef(new Set());
-  const sharedBoundaryEdgeKeys = useMemo(() => {
-    if (isDragging) return cachedSharedEdgesRef.current;
-    if (placed.length < 2) return new Set();
-    const all = []; // [{ key, worldShape, aabb }]
-    for (const pt of placed) {
-      const tile = tiles.find((t) => t.id === pt.tileId);
-      if (!tile) continue;
-      for (let i = 0; i < tile.edges.length; i++) {
-        const localShape = edgeToShape(tile.edges[i], tile.vertices);
-        if (!localShape) continue;
-        const worldShape = transformShape(localShape, pt);
-        all.push({ key: `${pt.id}:${i}`, worldShape, aabb: aabbForShape(worldShape) });
-      }
-    }
-    // Spatial-index the boundary edges so we only run shapesEqual on pairs
-    // whose AABBs overlap.
-    const grid = new GridIndex(chooseCellSize(all.map((x) => x.aabb)));
-    for (let i = 0; i < all.length; i++) grid.insert(i, all[i].aabb);
-    const shared = new Set();
-    const seen = new Set();
-    for (let i = 0; i < all.length; i++) {
-      const candidates = grid.query(all[i].aabb);
-      for (const j of candidates) {
-        if (j <= i) continue;
-        const k = `${i},${j}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        if (shapesEqual(all[i].worldShape, all[j].worldShape)) {
-          shared.add(all[i].key);
-          shared.add(all[j].key);
-        }
-      }
-    }
-    cachedSharedEdgesRef.current = shared;
-    return shared;
-  }, [placed, tiles, isDragging]);
-
   // ============================ INK GRAPH (for fills) ============================
   // Every visible ink in world coords, as stroked-shapes. Inputs to the planar
   // face finder: any ink that bounds a coloured region needs to be in here.
+  // Polygon boundary edges are intentionally NOT included — only ink-bounded
+  // faces are colorable. If you want a polygon edge to bound a colored region,
+  // ink it.
   const globalInkShapes = useMemo(() => {
     const out = [];
     // shapeId is a stable string keyed off the resolved world-space geometry.
@@ -191,61 +150,56 @@ export default function ZellijApp() {
     const idLine = (a, b) => `L_${a.x}_${a.y}_${b.x}_${b.y}`;
     const idArc = (c, r, a1, a2) => `A_${c.x}_${c.y}_${r}_${a1}_${a2}`;
     const idCirc = (c, r) => `C_${c.x}_${c.y}_${r}`;
+    // Dedupe by world-space shapeId. Two adjacent placed tiles that both inked
+    // the same shared boundary edge produce identical world geometry — adding
+    // both would create a collinear-overlap pair in buildFaces and corrupt
+    // the half-edge graph.
+    const seenIds = new Set();
+    const push = (shape) => {
+      if (seenIds.has(shape.shapeId)) return;
+      seenIds.add(shape.shapeId);
+      out.push(shape);
+    };
 
-    // Canvas inks are stored line/circle-relative; resolve to world geometry.
+    // Canvas inks (in world coords).
     for (const ink of inks) {
       if (ink.type === 'lineSeg') {
         const L = lines[ink.lineId];
         if (!L) continue;
         const a = lerp(L.p1, L.p2, ink.t1), b = lerp(L.p1, L.p2, ink.t2);
-        out.push({ type: 'line', a, b, shapeId: idLine(a, b) });
+        push({ type: 'line', a, b, shapeId: idLine(a, b) });
       } else if (ink.type === 'arc') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        out.push({
+        push({
           type: 'arc', center: C.center, radius: C.radius, ang1: ink.ang1, ang2: ink.ang2,
           shapeId: idArc(C.center, C.radius, ink.ang1, ink.ang2),
         });
       } else if (ink.type === 'wholeCircle') {
         const C = circles[ink.circleId];
         if (!C) continue;
-        out.push({
+        push({
           type: 'wholeCircle', center: C.center, radius: C.radius,
           shapeId: idCirc(C.center, C.radius),
         });
       }
     }
-    // Placed-tile inks (already stored as stroked-shapes in tile-local coords).
-    // Tag an ink as a boundary ink only when it sits on a tile-boundary edge
-    // that is *also shared with another placed tile* — i.e. an internal seam
-    // between adjacent placements. planarFaces uses this flag to exclude
-    // faces bounded entirely by such seams (the whole-tile interior of an
-    // adjacent pair shouldn't be a single fill target — its sub-faces from
-    // interior inks are). Outer-perimeter boundary inks DON'T get the flag,
-    // so a face bounded by them remains fillable.
+
+    // Placed-tile inks → world coords.
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
       for (const ink of tile.inks || []) {
-        let boundaryIdx = -1;
-        for (let i = 0; i < (tile.edges || []).length; i++) {
-          const s = edgeToShape(tile.edges[i], tile.vertices);
-          if (s && shapesEqual(s, ink)) { boundaryIdx = i; break; }
-        }
-        const isSharedBoundary =
-          boundaryIdx >= 0 && sharedBoundaryEdgeKeys.has(`${pt.id}:${boundaryIdx}`);
         const w = transformShape(ink, pt);
         let shapeId;
         if (w.type === 'line')             shapeId = idLine(w.a, w.b);
         else if (w.type === 'arc')         shapeId = idArc(w.center, w.radius, w.ang1, w.ang2);
         else if (w.type === 'wholeCircle') shapeId = idCirc(w.center, w.radius);
-        const tagged = { ...w, shapeId };
-        if (isSharedBoundary) tagged.isBoundary = true;
-        out.push(tagged);
+        push({ ...w, shapeId });
       }
     }
     return out;
-  }, [inks, lines, circles, placed, tiles, sharedBoundaryEdgeKeys]);
+  }, [inks, lines, circles, placed, tiles]);
 
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
   // pick the smallest containing face (most specific region). The graph build
@@ -268,10 +222,7 @@ export default function ZellijApp() {
       if (!liveIds.has(a) || !liveIds.has(b)) pairCacheRef.current.delete(key);
     }
 
-    // Exclude faces whose every edge came from a tile boundary ink — those faces
-    // are the tile's own interior, not a subdivision created by interior inks.
-    const fillable = faces.filter((face) => face.some((he) => !he.piece.isBoundary));
-    const withArea = fillable.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
+    const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
     withArea.sort((a, b) => a.area - b.area);
     cachedFacesRef.current = withArea;
     return withArea;
@@ -588,12 +539,14 @@ export default function ZellijApp() {
     }
     if (draft.kind === 'line') {
       const p2 = { x: snapped.x, y: snapped.y };
+      // Tap at the same point cancels — also the way to break a chain.
       if (dist(draft.p1, p2) < 1 / view.scale) { setDraft(null); return; }
       pushUndo();
       const id = newId();
       setLines((L) => ({ ...L, [id]: { p1: draft.p1, p2 } }));
-      setDraft(null);
-      setEditing({ kind: 'line', id });
+      // Chain: next line auto-anchors at this line's endpoint. Switching
+      // tools or tapping the endpoint again breaks the chain.
+      setDraft({ kind: 'line', p1: p2 });
     }
   };
 
