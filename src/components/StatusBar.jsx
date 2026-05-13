@@ -115,7 +115,7 @@ function computeHint({ tool, draft, polyDraft, editing }) {
     case 'circle':  return 'Circle: tap two points to set the compass, then tap to place.';
     case 'ink':     return 'Ink: tap a construction segment to bold it. Tap a tile edge to toggle its boldness.';
     case 'polygon': return 'Polygon: tap segments around a closed loop to capture as a tile.';
-    case 'fill':    return 'Fill: tap inside a region to apply the selected colour.';
+    case 'fill':    return 'Fill: tap inside an inked region to apply the selected colour.';
     case 'select':  return 'Select: tap a line, circle, or tile to edit it.';
     default:        return '';
   }
