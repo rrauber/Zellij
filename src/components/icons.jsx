@@ -35,12 +35,11 @@ export const PolygonIcon = () => (
   </I>
 );
 
-// Filled bucket-ish drop. The fill style cues "this places colour".
+// Drop outline. Matches the rest of the icon set's outlined style.
 export const FillIcon = () => (
-  <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" strokeWidth="2"
-       strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 3 C12 3 5 12 5 16 a7 7 0 0 0 14 0 C19 12 12 3 12 3 Z" fill="currentColor" />
-  </svg>
+  <I>
+    <path d="M12 3 C12 3 5 12 5 16 a7 7 0 0 0 14 0 C19 12 12 3 12 3 Z" />
+  </I>
 );
 
 // Pointer arrow. Top-left tail with the classic notched right side.
@@ -84,6 +83,13 @@ export const ClearIcon = () => (
   <I>
     <line x1="6"  y1="6"  x2="18" y2="18" />
     <line x1="18" y1="6"  x2="6"  y2="18" />
+  </I>
+);
+
+// Back chevron — used as the "leave fill mode" affordance in the toolbar.
+export const BackIcon = () => (
+  <I>
+    <polyline points="15 5 9 12 15 19" />
   </I>
 );
 

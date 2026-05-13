@@ -1,5 +1,4 @@
 import React from 'react';
-import { COLOR_PALETTE } from '../constants.js';
 import { COLOR } from '../theme.js';
 
 // Always-visible thin strip below the toolbar. Two jobs:
@@ -34,42 +33,15 @@ export default function StatusBar({
         minHeight: 32,
       }}
     >
-      <span style={{ flex: '0 1 auto' }}>{hint}</span>
-
-      {tool === 'fill' && (
-        <div className="flex items-center gap-1.5" style={{ marginLeft: 8 }}>
-          {COLOR_PALETTE.map((c) => {
-            const isSelected = c === selectedColor;
-            const isEraser = c === null;
-            return (
-              <button
-                key={c ?? 'eraser'}
-                onClick={() => onSelectColor(c)}
-                title={isEraser ? 'Eraser' : c}
-                style={{
-                  width: 20, height: 20,
-                  borderRadius: 10,
-                  background: isEraser ? 'transparent' : c,
-                  border: `1px solid ${isSelected ? COLOR.text : COLOR.borderStrong}`,
-                  boxShadow: isSelected ? `0 0 0 2px ${COLOR.surface}, 0 0 0 3px ${COLOR.text}` : 'none',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  flexShrink: 0,
-                  padding: 0,
-                }}
-              >
-                {isEraser && (
-                  <span style={{
-                    position: 'absolute', inset: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 11, color: COLOR.textMuted,
-                  }}>✕</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <span
+        style={{
+          flex: '0 1 auto',
+          minWidth: 0,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >{hint}</span>
 
       {editing && !draft && (
         <div className="flex gap-1.5 items-center" style={{ marginLeft: 'auto' }}>
@@ -96,27 +68,30 @@ export default function StatusBar({
 }
 
 // One-line description of the current tool / draft / polygon-progress state.
-// Falling-through cases are arranged from most specific (mid-draft prompt) to
-// most general (idle tool).
+// Kept short enough to fit one row on a typical phone (~35–45 chars) so the
+// status strip doesn't wrap. Falling-through cases are arranged from most
+// specific (mid-draft prompt) to most general (idle tool). Fill is the one
+// tool that returns an empty hint: when it's active the palette takes the
+// row so the two don't crowd each other.
 function computeHint({ tool, draft, polyDraft, editing }) {
-  if (draft?.kind === 'line') return 'Tap to set the second endpoint.';
-  if (draft?.kind === 'circle' && draft.step === 'measureA') return 'Tap a second point to set the compass width.';
-  if (draft?.kind === 'circle' && draft.step === 'placing') return 'Tap to place a circle. Tap the Circle tool to remeasure.';
+  if (draft?.kind === 'line') return 'Tap the second point.';
+  if (draft?.kind === 'circle' && draft.step === 'measureA') return 'Tap a second point for the radius.';
+  if (draft?.kind === 'circle' && draft.step === 'placing') return 'Tap to place. Re-tap Circle to remeasure.';
   if (polyDraft?.length > 0) {
-    return `Polygon: ${polyDraft.length} edge${polyDraft.length === 1 ? '' : 's'} — tap a connecting segment, or close back to the start.`;
+    return `Polygon: ${polyDraft.length} edge${polyDraft.length === 1 ? '' : 's'} — tap to extend, or close.`;
   }
   if (editing) {
-    if (editing.kind === 'line')       return 'Editing line — drag the handles to lengthen or rotate.';
-    if (editing.kind === 'circle')     return 'Editing circle — drag the centre or radius handle.';
-    if (editing.kind === 'placedTile') return 'Editing tile — drag to move, rotate or flip. Use Fill to colour regions.';
+    if (editing.kind === 'line')       return 'Editing line — drag handles to resize or rotate.';
+    if (editing.kind === 'circle')     return 'Editing circle — drag centre or radius.';
+    if (editing.kind === 'placedTile') return 'Editing tile — drag, rotate, flip.';
   }
   switch (tool) {
-    case 'line':    return 'Line: tap two points to draw a line. While editing, drag angle handles to snap to horizontal.';
-    case 'circle':  return 'Circle: tap two points to set the compass, then tap to place.';
-    case 'ink':     return 'Ink: tap a construction segment to bold it — inked lines also bound colour-fill regions.';
-    case 'polygon': return 'Polygon: tap connected construction segments to enclose an area; the captured shape becomes a reusable tile in the Tiles drawer.';
-    case 'fill':    return 'Fill: tap inside an ink-bounded region to apply the selected colour. Polygon edges only act as boundaries when inked.';
-    case 'select':  return 'Select: tap a line, circle, or tile to edit it.';
+    case 'line':    return 'Line: tap two points to draw.';
+    case 'circle':  return 'Circle: tap two points, then place.';
+    case 'ink':     return 'Ink: tap to bold — inks bound colour fills.';
+    case 'polygon': return 'Polygon: tap segments around a closed loop.';
+    case 'fill':    return 'Fill: tap inside an inked region to colour it.';
+    case 'select':  return 'Select: tap a line, circle, or tile.';
     default:        return '';
   }
 }
@@ -138,5 +113,34 @@ function SmallBtn({ children, onClick, title, danger }) {
         whiteSpace: 'nowrap',
       }}
     >{children}</button>
+  );
+}
+
+export function Swatch({ color, selected, onSelect }) {
+  const isEraser = color === null;
+  return (
+    <button
+      onClick={onSelect}
+      title={isEraser ? 'Eraser' : color}
+      style={{
+        width: 20, height: 20,
+        borderRadius: 10,
+        background: isEraser ? 'transparent' : color,
+        border: `1px solid ${selected ? COLOR.text : COLOR.borderStrong}`,
+        boxShadow: selected ? `0 0 0 2px ${COLOR.surface}, 0 0 0 3px ${COLOR.text}` : 'none',
+        cursor: 'pointer',
+        position: 'relative',
+        flexShrink: 0,
+        padding: 0,
+      }}
+    >
+      {isEraser && (
+        <span style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, color: COLOR.textMuted,
+        }}>✕</span>
+      )}
+    </button>
   );
 }

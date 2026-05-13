@@ -16,15 +16,21 @@ export const DEFAULT_ROTATION_STEP_IDX = 2;
 
 // Colour palette for the Fill tool. Loosely traditional zellij ground tones —
 // cobalt, saffron gold, terracotta, emerald, cream, honey ochre, soot black —
-// plus a leading null which acts as the eraser.
+// each pre-blended with the tile tint (formerly applied as an overlay
+// wash) so that no per-tile wash layer is needed: a colour drawn straight
+// onto the canvas already reads with that warm tonal cast.
+//
+// The pre-blend formula matches the old wash (`rgb(225,200,150)` over the
+// fill at α 0.25):  new = 0.25 · wash + 0.75 · raw.
+// Leading null acts as the eraser.
 export const COLOR_PALETTE = [
   null,
-  '#1B4965',
-  '#C8B038',
-  '#8B2E1A',
-  '#3F6634',
-  '#E8E1D1',
-  '#9C8A6A',
-  '#1B1B1B',
+  '#4D6971', // cobalt
+  '#CEB650', // saffron gold
+  '#A15539', // terracotta
+  '#687F4D', // emerald
+  '#E6DBC2', // cream
+  '#AD9A75', // honey ochre
+  '#4D463A', // soot black
 ];
-export const DEFAULT_COLOR = '#1B4965';
+export const DEFAULT_COLOR = '#4D6971';

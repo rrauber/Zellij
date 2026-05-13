@@ -9,13 +9,27 @@ import { edgeToShape } from '../tiles/transform.js';
 // Bumped whenever the persisted shape changes. `migrate()` runs on load and
 // brings older snapshots up to the current version, so users don't lose
 // their work across schema changes.
-const DOC_VERSION = 3;
+const DOC_VERSION = 4;
 
 // v1 → v2: boundary edges are now part of `inks` rather than being a separate
 // dark stroke. Synthesise one ink per edge so old tiles render the same way.
 //
 // v2 → v3: introduces a top-level `colors` slice ([{x, y, color}]) for the
 // fill tool. Just default to empty.
+//
+// v3 → v4: the tile-silhouette wash was retired and folded directly into the
+// default palette colours. Anchors saved under the old palette would suddenly
+// render more saturated (no wash on top), so we rewrite each known old hex
+// to its pre-tinted equivalent. Unknown / user-picked colours pass through.
+const V3_TO_V4_COLORS = {
+  '#1B4965': '#4D6971',
+  '#C8B038': '#CEB650',
+  '#8B2E1A': '#A15539',
+  '#3F6634': '#687F4D',
+  '#E8E1D1': '#E6DBC2',
+  '#9C8A6A': '#AD9A75',
+  '#1B1B1B': '#4D463A',
+};
 function migrate(s) {
   if (!s) return s;
   let v = s.version ?? 1;
@@ -32,6 +46,13 @@ function migrate(s) {
   if (v < 3) {
     s = { ...s, colors: s.colors || [] };
     v = 3;
+  }
+  if (v < 4) {
+    const colors = (s.colors || []).map((c) =>
+      V3_TO_V4_COLORS[c.color] ? { ...c, color: V3_TO_V4_COLORS[c.color] } : c
+    );
+    s = { ...s, colors };
+    v = 4;
   }
   return { ...s, version: DOC_VERSION };
 }

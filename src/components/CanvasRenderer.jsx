@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef } from 'react';
-import { tilePathD, tilePathDWorld } from '../tiles/tilePath.js';
+import { tilePathD } from '../tiles/tilePath.js';
 import { edgeToShape } from '../tiles/transform.js';
 import { shapesEqual } from '../geometry/shapeEqual.js';
 import { HANDLE_R } from '../constants.js';
@@ -59,65 +59,16 @@ export default function CanvasRenderer({
 
     const draw = strokeDrawer(ctx, view);
 
-    // 1. (Removed: faint un-inked tile edge under-pass.) Drawing the polygon
-    // outline as a faint stroke for every placed tile produced a visible
-    // hairline on every internal tile-tile boundary that the sharedEdgeKeys
-    // suppression failed to match — brittle to position drift, arc traversal
-    // direction, etc. The silhouette wash below already defines the placed
-    // tile's outline (tan inside, canvas color outside); inking a boundary
-    // edge is the way to give it a stronger outline.
-
-    // 2. Coloured face fills
+    // 1. Coloured face fills, drawn straight onto the canvas. The default
+    // palette colours have the old tile-silhouette wash pre-blended into
+    // them, so we don't need a separate per-tile wash layer; unfilled
+    // tiles just expose the canvas underneath.
     for (const cf of coloredFaces) {
       ctx.fillStyle = cf.color;
       ctx.fill(new Path2D(cf.d));
     }
 
-    // 3. Combined silhouette wash, via an offscreen canvas.
-    //
-    // The naïve approach — one combined Path2D filled at alpha 0.25 — leaves
-    // a visible hairline at the boundary between adjacent tile silhouettes.
-    // Two AA-coverage values from adjacent tiles compose under `source-over`
-    // as `s + d*(1-s)`, so a pixel covered 50% by each tile lands at alpha
-    // 0.75 instead of 1.0; after the 0.25 composite that pixel reads ~0.19
-    // vs ~0.25 just inside, painting a thin lighter line at the seam.
-    //
-    // Routing through an offscreen buffer at alpha 1.0 gets us most of the
-    // way there (overlapping fills clamp to alpha 1.0), but per-tile AA at
-    // the silhouette boundary still under-covers shared-edge pixels for the
-    // same reason. Stroking each silhouette with a 1-device-pixel line in
-    // the same color saturates those boundary pixels to full coverage, so
-    // the union is a single uniformly opaque region on the offscreen canvas,
-    // and the final composite produces one consistent wash with no seams.
-    if (placed.length > 0) {
-      const dpr = window.devicePixelRatio || 1;
-      const off = document.createElement('canvas');
-      off.width = staticCanvasRef.current.width;
-      off.height = staticCanvasRef.current.height;
-      const offCtx = off.getContext('2d');
-      offCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      offCtx.translate(view.tx, view.ty);
-      offCtx.scale(view.scale, view.scale);
-      offCtx.fillStyle = 'rgb(225,200,150)';
-      offCtx.strokeStyle = 'rgb(225,200,150)';
-      offCtx.lineWidth = 1 / view.scale;
-      offCtx.lineJoin = 'miter';
-      for (const pt of placed) {
-        const tile = tiles.find((t) => t.id === pt.tileId);
-        if (!tile) continue;
-        const path = new Path2D(tilePathDWorld(tile, pt));
-        offCtx.fill(path);
-        offCtx.stroke(path);
-      }
-
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalAlpha = 0.25;
-      ctx.drawImage(off, 0, 0);
-      ctx.restore();
-    }
-
-    // 4. Construction (Canvas)
+    // 2. Construction (Canvas)
     if (showCons) {
       Object.values(circles).forEach((c) => {
         draw({ type: 'wholeCircle', center: c.center, radius: c.radius }, '#9C8A6A', 1, 0.4);

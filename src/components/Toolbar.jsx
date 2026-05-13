@@ -19,10 +19,12 @@ function useHasFinePointer() {
   return yes;
 }
 import { COLOR } from '../theme.js';
+import { COLOR_PALETTE } from '../constants.js';
 import {
   LineIcon, CircleIcon, InkIcon, PolygonIcon, FillIcon, SelectIcon,
-  EyeIcon, EyeOffIcon, ClearIcon, KebabIcon,
+  EyeIcon, EyeOffIcon, ClearIcon, KebabIcon, BackIcon,
 } from './icons.jsx';
+import { Swatch } from './StatusBar.jsx';
 
 const TOOLS = [
   { id: 'line',    label: 'Line',    shortcut: 'L', Icon: LineIcon    },
@@ -35,10 +37,53 @@ const TOOLS = [
 
 export default function Toolbar({
   tool, onSelectTool,
+  selectedColor, onSelectColor,
+  onExitFill,
   showCons, onToggleCons,
   confirmClear, onClear,
 }) {
   const showShortcuts = useHasFinePointer();
+  const kebab = (
+    <KebabMenu
+      showCons={showCons}
+      onToggleCons={onToggleCons}
+      confirmClear={confirmClear}
+      onClear={onClear}
+    />
+  );
+
+  // Fill mode swaps the toolbar over to a colour-picker layout — a back
+  // chevron (returns to whatever tool the user was on before fill) on the
+  // left, the palette in the middle, kebab on the right. Frees the status
+  // bar for a real "tap a region" hint instead of crowding both onto one
+  // row.
+  if (tool === 'fill') {
+    return (
+      <div
+        className="flex items-center px-2 py-1.5 gap-1.5"
+        style={{
+          background: COLOR.surface,
+          borderBottom: `1px solid ${COLOR.border}`,
+        }}
+      >
+        <Btn onClick={onExitFill} title="Back to tools (Esc)">
+          <BackIcon />
+        </Btn>
+        <div style={{ width: 1, height: 24, background: COLOR.border, margin: '0 4px' }} />
+        {COLOR_PALETTE.map((c) => (
+          <Swatch
+            key={c ?? 'eraser'}
+            color={c}
+            selected={c === selectedColor}
+            onSelect={() => onSelectColor(c)}
+          />
+        ))}
+        <div style={{ flex: 1 }} />
+        {kebab}
+      </div>
+    );
+  }
+
   return (
     <div
       className="flex items-center px-2 py-1.5 gap-1 flex-wrap"
@@ -59,12 +104,7 @@ export default function Toolbar({
         </Btn>
       ))}
       <div style={{ flex: 1 }} />
-      <KebabMenu
-        showCons={showCons}
-        onToggleCons={onToggleCons}
-        confirmClear={confirmClear}
-        onClear={onClear}
-      />
+      {kebab}
     </div>
   );
 }

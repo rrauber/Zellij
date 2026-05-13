@@ -30,13 +30,12 @@ export const COLOR = {
   danger:        '#DC2626',  // clear / delete (cleaner red than burgundy)
 
   // ---- Canvas (artwork side) ----
-  // Subtle warm-leaning very-light gray. Distinct from chrome (it's slightly
-  // darker, reads as a "drawing surface" beneath the panels) without being
-  // overtly parchment. The translucent tile silhouette tint still composites
-  // to a hair warmer than the canvas, preserving the polygon-over-canvas
-  // contrast we liked from the original.
-  canvas:        '#EFEDE8',
-  tileFill:      'rgba(225,200,150,0.25)',
+  // Subtle warm-leaning very-light gray, ~30 % of the way from the
+  // original `#EFEDE8` toward the old composited tile-area tone `#ECE4D4`.
+  // The wash is gone — its tint lives in the default fill palette — but
+  // a slightly warmer surround keeps the cool blues from reading too
+  // warm against a cold-white background.
+  canvas:        '#EEEAE2',
   ink:           '#1B1B1B',
   construction:  '#9C8A6A',
 };
