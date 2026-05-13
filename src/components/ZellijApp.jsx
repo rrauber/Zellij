@@ -31,6 +31,7 @@ import Toolbar from './Toolbar.jsx';
 import StatusBar from './StatusBar.jsx';
 import Inventory from './Inventory.jsx';
 import CanvasRenderer from './CanvasRenderer.jsx';
+import { UndoIcon, RedoIcon } from './icons.jsx';
 
 export default function ZellijApp() {
   // ============================ STATE ============================
@@ -1161,8 +1162,6 @@ export default function ZellijApp() {
     return { ...p, rotation: Math.round(p.rotation / step) * step };
   }));
 
-  const recenter = () => setView({ tx: containerSize.w / 2, ty: containerSize.h / 2, scale: view.scale });
-
   // Cancel any in-flight selection / draft / polygon. Used by tool switches,
   // undo/redo (state was just replaced; old refs are stale), and canvas clear.
   const clearInteraction = () => {
@@ -1191,7 +1190,7 @@ export default function ZellijApp() {
   kbdRef.current = {
     editing, tool, containerSize,
     deleteLine, deleteCircle, deletePlaced,
-    undoAction, redoAction, recenter, clearInteraction,
+    undoAction, redoAction, clearInteraction,
     setTool, setShowCons, zoomAt,
   };
   useEffect(() => {
@@ -1237,7 +1236,6 @@ export default function ZellijApp() {
         case 'v': case 'V': // V for "select" — S is too easy to fat-finger near 'A'/'D'
         case 's': case 'S': s.setTool('select');  s.clearInteraction(); break;
         case 'h': case 'H': s.setShowCons((x) => !x); break;
-        case 'r': case 'R': s.recenter(); break;
         case '+': case '=':
           s.zoomAt(s.containerSize.w / 2, s.containerSize.h / 2, 1.2);
           break;
@@ -1306,10 +1304,7 @@ export default function ZellijApp() {
       <Toolbar
         tool={tool}
         onSelectTool={(t) => { setTool(t); clearInteraction(); }}
-        onUndo={undoAction} canUndo={canUndo}
-        onRedo={redoAction} canRedo={canRedo}
         showCons={showCons} onToggleCons={() => setShowCons((s) => !s)}
-        onRecenter={recenter}
         confirmClear={confirmClear} onClear={onClickClear}
       />
 
@@ -1424,6 +1419,10 @@ export default function ZellijApp() {
             containerSize={containerSize}
             inkPaths={inkPaths}
             editing={editing}
+          />
+          <FloatingHistoryCluster
+            onUndo={undoAction} canUndo={canUndo}
+            onRedo={redoAction} canRedo={canRedo}
           />
         </div>
 
@@ -1735,5 +1734,61 @@ function addPlacedTileHandles(handles, pt, tile, id, {
     },
     allowSnap: false,
   });
+}
+
+// Floating undo/redo cluster overlaid in the top-right of the canvas
+// surface. Pulled out of the toolbar to keep the toolbar to one row on
+// phones. Pointer-down stops propagation so tapping a history button
+// doesn't kick off a pan/draw on the canvas underneath.
+function FloatingHistoryCluster({ onUndo, canUndo, onRedo, canRedo }) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 8,
+        right: 8,
+        display: 'flex',
+        gap: 4,
+        zIndex: 10,
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <FloatBtn onClick={onUndo} disabled={!canUndo} title="Undo (⌘Z)">
+        <UndoIcon />
+      </FloatBtn>
+      <FloatBtn onClick={onRedo} disabled={!canRedo} title="Redo (⇧⌘Z)">
+        <RedoIcon />
+      </FloatBtn>
+    </div>
+  );
+}
+
+function FloatBtn({ children, onClick, disabled, title }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        width: 36,
+        height: 36,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 8,
+        border: `1px solid ${COLOR.border}`,
+        background: 'rgba(250, 250, 250, 0.85)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        color: COLOR.text,
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.35 : 1,
+        boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+        padding: 0,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 

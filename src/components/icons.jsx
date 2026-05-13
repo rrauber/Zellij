@@ -80,20 +80,18 @@ export const EyeOffIcon = () => (
   </I>
 );
 
-// Crosshair / target — recenter.
-export const CenterIcon = () => (
-  <I>
-    <circle cx="12" cy="12" r="3" />
-    <line x1="12" y1="2"  x2="12" y2="6"  />
-    <line x1="12" y1="18" x2="12" y2="22" />
-    <line x1="2"  y1="12" x2="6"  y2="12" />
-    <line x1="18" y1="12" x2="22" y2="12" />
-  </I>
-);
-
 export const ClearIcon = () => (
   <I>
     <line x1="6"  y1="6"  x2="18" y2="18" />
     <line x1="18" y1="6"  x2="6"  y2="18" />
   </I>
+);
+
+// Kebab — three dots, overflow-menu trigger.
+export const KebabIcon = () => (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+    <circle cx="12" cy="5" r="1.6" />
+    <circle cx="12" cy="12" r="1.6" />
+    <circle cx="12" cy="19" r="1.6" />
+  </svg>
 );

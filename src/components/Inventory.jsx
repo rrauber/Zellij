@@ -27,8 +27,10 @@ export default function Inventory({
           fontWeight: 500,
         }}
       >
-        <span>Inventory</span>
-        <span style={{ color: COLOR.textMuted, fontSize: 12 }}>{tiles.length}</span>
+        <span>Tiles</span>
+        {tiles.length > 0 && (
+          <span style={{ color: COLOR.textMuted, fontSize: 12 }}>{tiles.length}</span>
+        )}
         <span style={{ color: COLOR.textMuted, marginLeft: 4 }}>{sheetOpen ? '▾' : '▴'}</span>
       </button>
 

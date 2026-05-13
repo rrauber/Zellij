@@ -108,14 +108,14 @@ function computeHint({ tool, draft, polyDraft, editing }) {
   if (editing) {
     if (editing.kind === 'line')       return 'Editing line — drag the handles to lengthen or rotate.';
     if (editing.kind === 'circle')     return 'Editing circle — drag the centre or radius handle.';
-    if (editing.kind === 'placedTile') return 'Editing tile — drag to move, use the controls to rotate/flip.';
+    if (editing.kind === 'placedTile') return 'Editing tile — drag to move, rotate or flip. Use Fill to colour regions.';
   }
   switch (tool) {
-    case 'line':    return 'Line: tap two points to draw a line.';
+    case 'line':    return 'Line: tap two points to draw a line. While editing, drag angle handles to snap to horizontal.';
     case 'circle':  return 'Circle: tap two points to set the compass, then tap to place.';
-    case 'ink':     return 'Ink: tap a construction segment to bold it. Tap a tile edge to toggle its boldness.';
-    case 'polygon': return 'Polygon: tap segments around a closed loop to capture as a tile.';
-    case 'fill':    return 'Fill: tap inside an inked region to apply the selected colour.';
+    case 'ink':     return 'Ink: tap a construction segment to bold it — inked lines also bound colour-fill regions.';
+    case 'polygon': return 'Polygon: tap connected construction segments to enclose an area; the captured shape becomes a reusable tile in the Tiles drawer.';
+    case 'fill':    return 'Fill: tap inside an ink-bounded region to apply the selected colour. Polygon edges only act as boundaries when inked.';
     case 'select':  return 'Select: tap a line, circle, or tile to edit it.';
     default:        return '';
   }
