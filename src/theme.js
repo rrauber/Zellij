@@ -36,6 +36,10 @@ export const COLOR = {
   // a slightly warmer surround keeps the cool blues from reading too
   // warm against a cold-white background.
   canvas:        '#EEEAE2',
+  // Default fill painted under every placed tile silhouette — a hair warmer
+  // and darker than the canvas so unfilled tiles read as distinct shapes
+  // rather than dissolving into the background. Colored fills paint over.
+  tileFill:      '#E8E1D1',
   ink:           '#1B1B1B',
   construction:  '#9C8A6A',
 };

@@ -59,10 +59,24 @@ export default function CanvasRenderer({
 
     const draw = strokeDrawer(ctx, view);
 
+    // 1a. Default tile silhouette fill — a hair warmer/darker than the
+    // canvas so unfilled tiles read as distinct shapes. Coloured face
+    // fills below paint over this where applicable.
+    placed.forEach((pt) => {
+      const tile = tiles.find((t) => t.id === pt.tileId);
+      if (!tile) return;
+      ctx.save();
+      ctx.translate(pt.position.x, pt.position.y);
+      ctx.rotate(pt.rotation);
+      if (pt.flipped) ctx.scale(-1, 1);
+      ctx.fillStyle = COLOR.tileFill;
+      ctx.fill(new Path2D(tilePathD(tile)));
+      ctx.restore();
+    });
+
     // 1. Coloured face fills, drawn straight onto the canvas. The default
     // palette colours have the old tile-silhouette wash pre-blended into
-    // them, so we don't need a separate per-tile wash layer; unfilled
-    // tiles just expose the canvas underneath.
+    // them, so they sit consistently against the lighter tile-fill backdrop.
     for (const cf of coloredFaces) {
       ctx.fillStyle = cf.color;
       ctx.fill(new Path2D(cf.d));
