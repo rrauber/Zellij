@@ -418,64 +418,72 @@ export default function ZellijApp() {
       points.push(p);
     }
 
-    // Second-pass filter when construction is hidden: drop any non-vertex
-    // snap point that *positionally* lies on a hidden construction shape.
-    // The flag-based filter above catches points that came *from* an
-    // intersection involving construction, but it doesn't catch points
-    // coming from another source (e.g., a tile-ink endpoint) that happen
-    // to coincide with a hidden construction line. Without this pass
-    // those dots look orphaned — floating where the user can't see any
-    // geometry. Tile vertices are exempt because corners are intrinsic
-    // to the polygon, not a by-product of construction.
+    // Second-pass filter when construction is hidden: drop snap points
+    // that *positionally* lie on a hidden construction shape — the
+    // flag-based filter above catches points whose *source* involved
+    // construction, but not points coming from another path (e.g., a
+    // tile-ink endpoint or a tile vertex) that happen to coincide with
+    // a hidden construction line. Without this pass those dots look
+    // orphaned — floating where the user can't see any geometry.
     //
-    // We check against both canvas construction (lines, circles) AND
-    // tile-internal construction (each placed tile's construction array,
-    // transformed to world).
+    // Tile-internal construction is treated differently from canvas
+    // construction: tile vertices are by definition at intersections of
+    // the tile's own construction (that's how zellij tiles are formed),
+    // so dropping them would erase every corner snap. Canvas construction
+    // crossing a tile corner *is* orphan-looking and worth hiding. So:
+    //
+    //   • tile-vertex points: filtered only against canvas construction.
+    //   • everything else: filtered against canvas + tile-internal.
     if (!showCons) {
       const TOL = 0.5; // world units; generous — we're matching "same place", not exact
 
-      // Collect every hidden construction stroke in world coords.
-      const hidden = []; // { type, a/b for line, center/radius/ang1/ang2 for arc/wholeCircle }
+      const canvasHidden = [];
       for (const id in lines) {
-        hidden.push({ type: 'line', a: lines[id].p1, b: lines[id].p2 });
+        canvasHidden.push({ type: 'line', a: lines[id].p1, b: lines[id].p2 });
       }
       for (const id in circles) {
-        hidden.push({ type: 'wholeCircle', center: circles[id].center, radius: circles[id].radius });
+        canvasHidden.push({ type: 'wholeCircle', center: circles[id].center, radius: circles[id].radius });
       }
+
+      const tileHidden = [];
       for (const pt of placed) {
         const tile = tiles.find((t) => t.id === pt.tileId);
         if (!tile?.construction) continue;
         for (const c of tile.construction) {
           const w = transformShape(c, pt);
-          if (w) hidden.push(w);
+          if (w) tileHidden.push(w);
         }
       }
 
-      if (hidden.length > 0) {
-        const onHidden = (p) => {
-          for (const s of hidden) {
-            if (s.type === 'line') {
-              const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
-              const len2 = dx * dx + dy * dy;
-              if (len2 < 1e-9) continue;
-              let t = ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / len2;
-              if (t < 0) t = 0; else if (t > 1) t = 1;
-              const cx = s.a.x + t * dx, cy = s.a.y + t * dy;
-              if (Math.hypot(p.x - cx, p.y - cy) < TOL) return true;
-            } else if (s.type === 'wholeCircle') {
-              const d = Math.hypot(p.x - s.center.x, p.y - s.center.y);
-              if (Math.abs(d - s.radius) < TOL) return true;
-            } else if (s.type === 'arc') {
-              const dx = p.x - s.center.x, dy = p.y - s.center.y;
-              const d = Math.hypot(dx, dy);
-              if (Math.abs(d - s.radius) >= TOL) continue;
-              const ang = Math.atan2(dy, dx);
-              if (isAngleBetween(ang, s.ang1, s.ang2)) return true;
-            }
+      const onAny = (p, list) => {
+        for (const s of list) {
+          if (s.type === 'line') {
+            const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+            const len2 = dx * dx + dy * dy;
+            if (len2 < 1e-9) continue;
+            let t = ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / len2;
+            if (t < 0) t = 0; else if (t > 1) t = 1;
+            const cx = s.a.x + t * dx, cy = s.a.y + t * dy;
+            if (Math.hypot(p.x - cx, p.y - cy) < TOL) return true;
+          } else if (s.type === 'wholeCircle') {
+            const d = Math.hypot(p.x - s.center.x, p.y - s.center.y);
+            if (Math.abs(d - s.radius) < TOL) return true;
+          } else if (s.type === 'arc') {
+            const dx = p.x - s.center.x, dy = p.y - s.center.y;
+            const d = Math.hypot(dx, dy);
+            if (Math.abs(d - s.radius) >= TOL) continue;
+            const ang = Math.atan2(dy, dx);
+            if (isAngleBetween(ang, s.ang1, s.ang2)) return true;
           }
-          return false;
-        };
-        points = points.filter((p) => p.kind === 'tile-vertex' || !onHidden(p));
+        }
+        return false;
+      };
+
+      if (canvasHidden.length + tileHidden.length > 0) {
+        points = points.filter((p) => {
+          if (p.kind === 'tile-vertex') return !onAny(p, canvasHidden);
+          return !onAny(p, canvasHidden) && !onAny(p, tileHidden);
+        });
       }
     }
 
