@@ -7,6 +7,10 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       html, body, #root { height: 100%; margin: 0; }
+      /* Use the dynamic viewport so iOS Safari's URL bar doesn't crop the
+         bottom Tiles drawer when it (re)appears after a tap near the bottom
+         edge. Falls back to the static `100%` above on older browsers. */
+      #root { height: 100dvh; }
     </style>
   </head>
   <body>

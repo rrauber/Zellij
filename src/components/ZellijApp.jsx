@@ -1369,8 +1369,12 @@ export default function ZellijApp() {
 
   return (
     <div
-      className="w-full h-screen flex flex-col"
+      className="w-full flex flex-col"
       style={{
+        // 100dvh tracks the *visible* viewport on iOS Safari — without it
+        // the bottom Tiles drawer slides under the URL bar when Safari
+        // re-shows it after a tap near the bottom edge.
+        height: '100dvh',
         background: COLOR.canvas,
         fontFamily: FONT_STACK,
         color: COLOR.text,
