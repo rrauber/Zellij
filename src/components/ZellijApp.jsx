@@ -274,6 +274,12 @@ export default function ZellijApp() {
     // them once per tileId in tile-LOCAL coords, then transform on use. A
     // symmetric design that places the same tile dozens of times now pays the
     // pairwise cost just once.
+    //
+    // We discard any intersection that falls outside the tile's polygon —
+    // tile.construction stores whole shapes (visually trimmed at render time
+    // by the silhouette clip), so two crossing construction circles can
+    // intersect well beyond the polygon boundary. Without this filter the
+    // user gets snap dots floating in empty canvas around every placed tile.
     const computeTileLocal = (tile) => {
       const localShapes = [
         ...(tile.edges || []).map((e) => ({ shape: edgeToShape(e, tile.vertices), isCons: false })),
@@ -285,6 +291,7 @@ export default function ZellijApp() {
       const tileGrid = new GridIndex(chooseCellSize(aabbs));
       for (let i = 0; i < localShapes.length; i++) tileGrid.insert(i, aabbs[i]);
 
+      const POLY_TOL = 1e-6; // include points exactly on the boundary
       const points = [];
       const seen = new Set();
       for (let i = 0; i < localShapes.length; i++) {
@@ -296,6 +303,15 @@ export default function ZellijApp() {
           seen.add(key);
           const isCons = localShapes[i].isCons || localShapes[j].isCons;
           for (const p of intersectShapes(localShapes[i].shape, localShapes[j].shape)) {
+            // Drop crossings that fall outside the polygon silhouette.
+            // pointInPoly is true for strictly-inside; nudge with a tiny
+            // tolerance for points that land exactly on an edge (these
+            // are common — every boundary-ink/construction crossing).
+            if (!pointInPoly(p, tile.vertices) &&
+                !pointInPoly({ x: p.x + POLY_TOL, y: p.y }, tile.vertices) &&
+                !pointInPoly({ x: p.x - POLY_TOL, y: p.y }, tile.vertices) &&
+                !pointInPoly({ x: p.x, y: p.y + POLY_TOL }, tile.vertices) &&
+                !pointInPoly({ x: p.x, y: p.y - POLY_TOL }, tile.vertices)) continue;
             points.push({ x: p.x, y: p.y, isCons });
           }
         }
@@ -330,11 +346,31 @@ export default function ZellijApp() {
       ].filter((x) => x.shape).map((x) => transformShape(x.shape, pt));
 
       if (canvasShapes.length > 0) {
+        // Inverse of the placement transform — bring world points back into
+        // tile-local coords so we can polygon-test against tile.vertices.
+        const toLocal = (w) => {
+          let local = sub(w, pt.position);
+          local = rot(local, -pt.rotation);
+          if (pt.flipped) local = { x: -local.x, y: local.y };
+          return local;
+        };
+        const POLY_TOL = 1e-6;
+        const insidePoly = (lp) =>
+          pointInPoly(lp, tile.vertices) ||
+          pointInPoly({ x: lp.x + POLY_TOL, y: lp.y }, tile.vertices) ||
+          pointInPoly({ x: lp.x - POLY_TOL, y: lp.y }, tile.vertices) ||
+          pointInPoly({ x: lp.x, y: lp.y + POLY_TOL }, tile.vertices) ||
+          pointInPoly({ x: lp.x, y: lp.y - POLY_TOL }, tile.vertices);
         for (const ts of tileWorldShapes) {
           const tsAabb = aabbForShape(ts);
           const candidates = canvasGrid.query(tsAabb);
           for (const ci of candidates) {
             for (const p of intersectShapes(ts, canvasShapes[ci])) {
+              // Tile geometry stored in tile.construction extends past the
+              // polygon (render-time clip handles the visuals), so a tile
+              // construction circle crossing a canvas line can intersect
+              // outside the silhouette. Drop those.
+              if (!insidePoly(toLocal(p))) continue;
               out.push({ x: p.x, y: p.y, kind: 'tile-intersection', isConstruction: true });
             }
           }
