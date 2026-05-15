@@ -144,9 +144,15 @@ export default function ZellijApp() {
   // ============================ INK GRAPH (for fills) ============================
   // Every visible ink in world coords, as stroked-shapes. Inputs to the planar
   // face finder: any ink that bounds a coloured region needs to be in here.
-  // Polygon boundary edges are intentionally NOT included — only ink-bounded
-  // faces are colorable. If you want a polygon edge to bound a colored region,
-  // ink it.
+  // Includes (a) canvas inks, (b) placed-tile inks, AND (c) placed-tile
+  // polygon edges. The edges are added so a tile's silhouette always bounds
+  // a fill region — without them, two adjacent tiles whose shared edge isn't
+  // explicitly inked end up dangling internal inks past each other, merging
+  // into one face and leaking colour between tiles. Visually un-inked edges
+  // still render faintly (or not at all when construction is hidden); this
+  // change is purely about fill topology. Coincident edges from adjacent
+  // tiles, and edges that overlap canvas inks, get unioned in the merge
+  // step below.
   const globalInkShapes = useMemo(() => {
     const out = [];
     // shapeId is a stable string keyed off the resolved world-space geometry.
@@ -191,17 +197,29 @@ export default function ZellijApp() {
       }
     }
 
-    // Placed-tile inks → world coords.
+    // Placed-tile inks + polygon edges → world coords. Edges are tagged
+    // (`fromEdge: true`) so downstream rendering can still distinguish
+    // bold inks from faint silhouette edges if it cares — for fill
+    // topology the distinction doesn't matter.
+    const pushTileShape = (w, fromEdge) => {
+      let shapeId;
+      if (w.type === 'line')             shapeId = idLine(w.a, w.b);
+      else if (w.type === 'arc')         shapeId = idArc(w.center, w.radius, w.ang1, w.ang2);
+      else if (w.type === 'wholeCircle') shapeId = idCirc(w.center, w.radius);
+      push({ ...w, shapeId, fromEdge });
+    };
     for (const pt of placed) {
       const tile = tiles.find((t) => t.id === pt.tileId);
       if (!tile) continue;
       for (const ink of tile.inks || []) {
         const w = transformShape(ink, pt);
-        let shapeId;
-        if (w.type === 'line')             shapeId = idLine(w.a, w.b);
-        else if (w.type === 'arc')         shapeId = idArc(w.center, w.radius, w.ang1, w.ang2);
-        else if (w.type === 'wholeCircle') shapeId = idCirc(w.center, w.radius);
-        push({ ...w, shapeId });
+        if (w) pushTileShape(w, false);
+      }
+      for (const edge of tile.edges || []) {
+        const local = edgeToShape(edge, tile.vertices);
+        if (!local) continue;
+        const w = transformShape(local, pt);
+        if (w) pushTileShape(w, true);
       }
     }
 
@@ -217,10 +235,6 @@ export default function ZellijApp() {
     // the canvas ink (whole line) are collinear and overlapping. Exact-match
     // dedup via shapeId can't catch this. We union them here.
     const merged = mergeColinear(out, idLine, idArc, idCirc);
-    if (typeof window !== 'undefined') {
-      window.__rawInkShapes = out;
-      window.__mergedInkShapes = merged;
-    }
     return merged;
   }, [inks, lines, circles, placed, tiles]);
 
@@ -248,12 +262,6 @@ export default function ZellijApp() {
     const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
     withArea.sort((a, b) => a.area - b.area);
     cachedFacesRef.current = withArea;
-    if (typeof window !== 'undefined') {
-      window.__faces = withArea.map((f) => ({
-        area: f.area,
-        verts: f.face.map((h) => f.vertices.get(h.from)),
-      }));
-    }
     return withArea;
   }, [globalInkShapes, isDragging]);
 
