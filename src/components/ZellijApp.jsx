@@ -204,7 +204,24 @@ export default function ZellijApp() {
         push({ ...w, shapeId });
       }
     }
-    return out;
+
+    // Post-process: merge collinear-overlapping line shapes and arc/circle
+    // shapes that lie on the same underlying line / circle. buildFaces breaks
+    // on this kind of overlap (two segments sharing the same locus but
+    // different endpoints don't generate proper intersection events with
+    // their crossers, leaving the half-edge graph inconsistent).
+    //
+    // Common trigger: user inks the whole canvas line, draws a polygon along
+    // a sub-segment of it, and places the resulting tile on top of the
+    // original canvas inks. The placed tile's boundary ink (sub-segment) and
+    // the canvas ink (whole line) are collinear and overlapping. Exact-match
+    // dedup via shapeId can't catch this. We union them here.
+    const merged = mergeColinear(out, idLine, idArc, idCirc);
+    if (typeof window !== 'undefined') {
+      window.__rawInkShapes = out;
+      window.__mergedInkShapes = merged;
+    }
+    return merged;
   }, [inks, lines, circles, placed, tiles]);
 
   // The bounded faces of the ink graph. Sorted by area ascending so a tap can
@@ -231,6 +248,12 @@ export default function ZellijApp() {
     const withArea = faces.map((face) => ({ face, vertices, area: signedArea(face, vertices) }));
     withArea.sort((a, b) => a.area - b.area);
     cachedFacesRef.current = withArea;
+    if (typeof window !== 'undefined') {
+      window.__faces = withArea.map((f) => ({
+        area: f.area,
+        verts: f.face.map((h) => f.vertices.get(h.from)),
+      }));
+    }
     return withArea;
   }, [globalInkShapes, isDragging]);
 
@@ -972,19 +995,33 @@ export default function ZellijApp() {
       const shape = edgeToShape(e, tile.vertices);
       return !!shape && (tile.inks || []).some((ink) => shapesEqual(shape, ink));
     }
+    // Containment, not equality. The ink stored on a canvas line records the
+    // exact sub-segment t-range that was clicked. But the sub-segments only
+    // exist between the *current* set of intersection points — drawing the
+    // polygon later may introduce new crossings (or pre-existing crossings
+    // may have appeared after inking), making the polygon edge a tighter
+    // sub-range than what's stored. As long as the polygon edge sits
+    // entirely within an inked range, treat it as inked.
+    const EPS_T = EPS * 10;
     if (s.type === 'lineSeg' && s.lineId) {
-      return inks.some(
-        (k) => k.type === 'lineSeg' && k.lineId === s.lineId
-            && Math.abs(k.t1 - s.t1) < EPS * 10
-            && Math.abs(k.t2 - s.t2) < EPS * 10,
-      );
+      const sLo = Math.min(s.t1, s.t2);
+      const sHi = Math.max(s.t1, s.t2);
+      return inks.some((k) => {
+        if (k.type !== 'lineSeg' || k.lineId !== s.lineId) return false;
+        const kLo = Math.min(k.t1, k.t2);
+        const kHi = Math.max(k.t1, k.t2);
+        return sLo >= kLo - EPS_T && sHi <= kHi + EPS_T;
+      });
     }
     if (s.type === 'arc' && s.circleId) {
-      return inks.some(
-        (k) => k.type === 'arc' && k.circleId === s.circleId
-            && Math.abs(k.ang1 - s.ang1) < EPS * 10
-            && Math.abs(k.ang2 - s.ang2) < EPS * 10,
-      );
+      return inks.some((k) => {
+        if (k.type === 'wholeCircle' && k.circleId === s.circleId) return true;
+        if (k.type !== 'arc' || k.circleId !== s.circleId) return false;
+        // Both endpoints of the polygon arc must fall within the ink's CCW
+        // angular range. isAngleBetween already handles wrap-around.
+        return isAngleBetween(s.ang1, k.ang1, k.ang2)
+            && isAngleBetween(s.ang2, k.ang1, k.ang2);
+      });
     }
     return false;
   };
@@ -1572,6 +1609,144 @@ export default function ZellijApp() {
       </div>
     </div>
   );
+}
+
+// ============================ INK-SHAPE MERGE ============================
+// Take a flat list of stroked shapes (lines, arcs, wholeCircles) in world
+// coords and collapse anything that lies on the same underlying line / circle
+// into a single union shape. This is what keeps buildFaces honest when the
+// user inks a long canvas line and then places a tile whose boundary ink is
+// a sub-segment of that same line — without the merge, both end up in the
+// graph as collinear-overlapping half-edges and corner crossings stop
+// resolving correctly.
+function mergeColinear(shapes, idLine, idArc, idCirc) {
+  const M_EPS = 1e-6;
+
+  // --- Lines: group by line-equation, then merge interval ranges. ---
+  const lineGroups = new Map(); // key = `${nx}_${ny}_${d}` → array of {shape, nx, ny}
+  const nonLines = [];
+  for (const s of shapes) {
+    if (s.type !== 'line') { nonLines.push(s); continue; }
+    const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < M_EPS) { nonLines.push(s); continue; }
+    let nx = dx / len, ny = dy / len;
+    // Canonicalise direction so opposite-direction collinears collide.
+    if (nx < -M_EPS || (Math.abs(nx) < M_EPS && ny < 0)) { nx = -nx; ny = -ny; }
+    // Signed perpendicular distance from origin — identifies the line.
+    const d = -ny * s.a.x + nx * s.a.y;
+    const key = `${nx.toFixed(6)}_${ny.toFixed(6)}_${d.toFixed(6)}`;
+    if (!lineGroups.has(key)) lineGroups.set(key, []);
+    lineGroups.get(key).push({ shape: s, nx, ny });
+  }
+
+  const mergedLines = [];
+  for (const group of lineGroups.values()) {
+    if (group.length === 1) { mergedLines.push(group[0].shape); continue; }
+    const { nx, ny } = group[0];
+    // Parametrize each shape's endpoints along (nx, ny).
+    const intervals = group.map((g) => {
+      const ta = g.shape.a.x * nx + g.shape.a.y * ny;
+      const tb = g.shape.b.x * nx + g.shape.b.y * ny;
+      return [Math.min(ta, tb), Math.max(ta, tb)];
+    });
+    intervals.sort((a, b) => a[0] - b[0]);
+    const unioned = [intervals[0].slice()];
+    for (let i = 1; i < intervals.length; i++) {
+      const top = unioned[unioned.length - 1];
+      const cur = intervals[i];
+      if (cur[0] <= top[1] + M_EPS) {
+        top[1] = Math.max(top[1], cur[1]);
+      } else {
+        unioned.push(cur.slice());
+      }
+    }
+    // Recover a point on the line via the first shape's a, then walk along (nx, ny).
+    const ref = group[0].shape.a;
+    const ta0 = ref.x * nx + ref.y * ny;
+    const ox = ref.x - ta0 * nx, oy = ref.y - ta0 * ny;
+    for (const [t1, t2] of unioned) {
+      const a = { x: ox + t1 * nx, y: oy + t1 * ny };
+      const b = { x: ox + t2 * nx, y: oy + t2 * ny };
+      mergedLines.push({ type: 'line', a, b, shapeId: idLine(a, b) });
+    }
+  }
+
+  // --- Arcs / wholeCircles: group by (center, radius), then merge angularly. ---
+  const arcGroups = new Map(); // key = `${cx}_${cy}_${r}` → array of normalised arc records
+  const others = [];
+  for (const s of nonLines) {
+    if (s.type !== 'arc' && s.type !== 'wholeCircle') { others.push(s); continue; }
+    const key = `${s.center.x.toFixed(6)}_${s.center.y.toFixed(6)}_${s.radius.toFixed(6)}`;
+    if (!arcGroups.has(key)) arcGroups.set(key, []);
+    arcGroups.get(key).push(s);
+  }
+
+  const TWO_PI = 2 * Math.PI;
+  const wrap = (x) => { x = x % TWO_PI; if (x < 0) x += TWO_PI; return x; };
+
+  const mergedArcs = [];
+  for (const group of arcGroups.values()) {
+    if (group.length === 1) { mergedArcs.push(group[0]); continue; }
+    if (group.some((s) => s.type === 'wholeCircle')) {
+      // Anything plus a whole circle collapses to the whole circle.
+      const c = group[0];
+      mergedArcs.push({
+        type: 'wholeCircle', center: c.center, radius: c.radius,
+        shapeId: idCirc(c.center, c.radius),
+      });
+      continue;
+    }
+    // All arcs. Express each as [startCCW, endCCW] in [0, 2π) relative to angle 0.
+    // Wrap-around arcs are stored as two intervals.
+    const ivs = [];
+    for (const s of group) {
+      const a1 = wrap(s.ang1);
+      const span = wrap(s.ang2 - s.ang1) || TWO_PI;
+      if (a1 + span <= TWO_PI + M_EPS) {
+        ivs.push([a1, a1 + span]);
+      } else {
+        ivs.push([a1, TWO_PI]);
+        ivs.push([0, a1 + span - TWO_PI]);
+      }
+    }
+    ivs.sort((a, b) => a[0] - b[0]);
+    const unioned = [ivs[0].slice()];
+    for (let i = 1; i < ivs.length; i++) {
+      const top = unioned[unioned.length - 1];
+      const cur = ivs[i];
+      if (cur[0] <= top[1] + M_EPS) {
+        top[1] = Math.max(top[1], cur[1]);
+      } else {
+        unioned.push(cur.slice());
+      }
+    }
+    // Stitch a wrap-around pair (last touches 2π, first touches 0).
+    if (unioned.length > 1) {
+      const first = unioned[0], last = unioned[unioned.length - 1];
+      if (first[0] <= M_EPS && last[1] >= TWO_PI - M_EPS) {
+        first[0] = last[0] - TWO_PI;
+        unioned.pop();
+      }
+    }
+    const totalSpan = unioned.reduce((s, iv) => s + (iv[1] - iv[0]), 0);
+    const c = group[0];
+    if (totalSpan >= TWO_PI - M_EPS) {
+      mergedArcs.push({
+        type: 'wholeCircle', center: c.center, radius: c.radius,
+        shapeId: idCirc(c.center, c.radius),
+      });
+      continue;
+    }
+    for (const [a1, a2] of unioned) {
+      mergedArcs.push({
+        type: 'arc', center: c.center, radius: c.radius, ang1: a1, ang2: a2,
+        shapeId: idArc(c.center, c.radius, a1, a2),
+      });
+    }
+  }
+
+  return [...mergedLines, ...mergedArcs, ...others];
 }
 
 // ============================ HANDLE BUILDER ============================
